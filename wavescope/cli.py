@@ -115,9 +115,9 @@ def cmd_scan(args) -> int:
 
 
 def cmd_signals(args) -> int:
-    from .vcd_reader import read_header
+    from .vcd_reader import open_vcd_text, read_header
     vcd = prepare_for_scan(args.wave, _wave_cfg(args))
-    with open(vcd, "r", errors="replace") as f:
+    with open_vcd_text(vcd) as f:
         signals, ts = read_header(f)
     shown = 0
     for s in signals:

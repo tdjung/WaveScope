@@ -25,7 +25,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from .vcd_reader import VcdSignal, read_header
+from .vcd_reader import VcdSignal, open_vcd_text, read_header
 
 _NAME_PC_STRONG = ("pc",)
 _NAME_PC_WEAK = ("epc", "iaddr", "instaddr", "instr", "inst", "fetch",
@@ -115,7 +115,7 @@ def scan(vcd_path: str,
          min_width: int = 8,
          ) -> ScanResult:
     ps = ParseStats()
-    with open(vcd_path, "r", errors="replace") as f:
+    with open_vcd_text(vcd_path) as f:
         signals, _ = read_header(f)
         ps.n_signals = len(signals)
 

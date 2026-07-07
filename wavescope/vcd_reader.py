@@ -9,7 +9,14 @@ tick_index counts rising edges of the chosen clock signal.
 
 from __future__ import annotations
 
+import bz2
+import gzip
 import io
+import lzma
+import os
+import shutil
+import subprocess
+import tempfile
 from dataclasses import dataclass
 from typing import Dict, Iterator, List, Optional, Tuple
 
@@ -23,6 +30,79 @@ class VcdSignal:
 
 class VcdError(Exception):
     pass
+
+
+_FST_MAGIC_HINT = None  # FST has no stable ASCII magic; detected by exclusion
+
+
+def open_vcd_text(path: str) -> io.TextIOBase:
+    """Open a VCD for text reading, transparently handling compression and
+    binary waveform formats saved with a .vcd name.
+
+    - gzip / bzip2 / xz compressed VCD: decompressed on the fly
+      (GTKWave opens these transparently, so they are common in the wild)
+    - FST / LXT2 / VZT binaries: converted via fst2vcd / lxt2vcd / vzt2vcd
+      if available in PATH (all ship with GTKWave)
+    """
+    with open(path, "rb") as f:
+        head = f.read(512)
+
+    if head[:2] == b"\x1f\x8b":
+        return io.TextIOWrapper(gzip.open(path, "rb"), errors="replace")
+    if head[:3] == b"BZh":
+        return io.TextIOWrapper(bz2.open(path, "rb"), errors="replace")
+    if head[:6] == b"\xfd7zXZ\x00":
+        return io.TextIOWrapper(lzma.open(path, "rb"), errors="replace")
+
+    # plain text? VCD headers are ASCII with $ keywords
+    if b"\x00" not in head and (b"$" in head or not head):
+        return open(path, "r", errors="replace")
+
+    # binary, not a known compression: try GTKWave converters
+    converted = _try_binary_converters(path)
+    if converted:
+        return open(converted, "r", errors="replace")
+
+    raise VcdError(
+        f"'{path}' is not a text VCD (binary content detected) and no "
+        f"converter succeeded.\n"
+        f"It is likely an FST/LXT2/VZT waveform saved with a .vcd name.\n"
+        f"  - identify it:  file {path}\n"
+        f"  - convert it :  fst2vcd {path} -o out.vcd   (ships with GTKWave)\n"
+        f"                  or lxt2vcd / vzt2vcd\n"
+        f"then pass the converted file, or install the converter in PATH "
+        f"so WaveScope can do this automatically.")
+
+
+def _try_binary_converters(path: str) -> Optional[str]:
+    out = os.path.join(tempfile.gettempdir(),
+                       os.path.basename(path) + ".wavescope.vcd")
+    for tool, argv in (("fst2vcd", [path, "-o", out]),
+                       ("lxt2vcd", [path]),
+                       ("vzt2vcd", [path])):
+        exe = shutil.which(tool)
+        if not exe:
+            continue
+        try:
+            if tool == "fst2vcd":
+                r = subprocess.run([exe] + argv, capture_output=True,
+                                   text=True, timeout=3600)
+                ok = r.returncode == 0 and os.path.exists(out) \
+                    and os.path.getsize(out) > 0
+            else:   # lxt2vcd/vzt2vcd write to stdout
+                with open(out, "w") as fo:
+                    r = subprocess.run([exe] + argv, stdout=fo,
+                                       stderr=subprocess.PIPE, text=True,
+                                       timeout=3600)
+                ok = r.returncode == 0 and os.path.getsize(out) > 0
+            if ok:
+                import sys
+                print(f"[wavescope] binary waveform converted with {tool} "
+                      f"-> {out}", file=sys.stderr)
+                return out
+        except (subprocess.TimeoutExpired, OSError):
+            continue
+    return None
 
 
 def _tokens(f: io.TextIOBase) -> Iterator[str]:
@@ -136,7 +216,7 @@ def iter_pc_samples(path: str, clock_name: str, pc_name: str,
       (useful for commit/retire-valid qualified PCs).
     Samples with X/Z bits in PC are skipped.
     """
-    with open(path, "r", errors="replace") as f:
+    with open_vcd_text(path) as f:
         signals, _ = read_header(f)
         clk = find_signal(signals, clock_name)
         pc = find_signal(signals, pc_name)

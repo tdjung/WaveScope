@@ -143,3 +143,27 @@ class TestDialects(unittest.TestCase):
         self.assertIn("final score", out)
         out2 = explain(res, "no_such_signal_xyz", TEXT)
         self.assertIn("not found", out2)
+
+
+class TestCompressed(unittest.TestCase):
+    def test_gzip_vcd(self):
+        import gzip
+        with tempfile.TemporaryDirectory() as d:
+            plain = os.path.join(d, "p.vcd")
+            make_vcd(plain)
+            gz = os.path.join(d, "all.vcd")     # gzip content, .vcd name
+            with open(plain, "rb") as fi, gzip.open(gz, "wb") as fo:
+                fo.write(fi.read())
+            res = scan(gz, text_ranges=TEXT)
+        self.assertTrue(res.pc_candidates)
+        self.assertTrue(res.pc_candidates[0].name.endswith("dbg_addr"))
+
+    def test_unknown_binary_raises_helpfully(self):
+        from wavescope.vcd_reader import VcdError, open_vcd_text
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "bin.vcd")
+            with open(p, "wb") as f:
+                f.write(b"\x00\x01\x02FSTB\x00garbage" * 20)
+            with self.assertRaises(VcdError) as cm:
+                open_vcd_text(p)
+            self.assertIn("fst2vcd", str(cm.exception))
