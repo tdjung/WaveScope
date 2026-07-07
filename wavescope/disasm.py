@@ -56,6 +56,7 @@ class BinaryInfo:
 
 _DISASM_RE = re.compile(
     r"^\s*([0-9a-fA-F]+):\s+((?:[0-9a-fA-F]{2,8}\s+)+)\s*(\S+)?\s*(.*)$")
+_LABEL_RE = re.compile(r"^([0-9a-fA-F]+) <(.+)>:\s*$")
 _SYM_RE = re.compile(
     r"^([0-9a-fA-F]+)\s+([lgw!\s])([w\s])([C\s])([W\s])([Ii\s])([dD\s])([FfO\s])\s+(\S+)\s+([0-9a-fA-F]+)\s+(.*)$")
 
@@ -84,7 +85,12 @@ def load_binary(elf_path: str, toolchain_prefix: str = "",
         out = subprocess.run([objdump, "-d", elf_path],
                              capture_output=True, text=True, check=True)
     addrs: List[int] = []
+    labels: Dict[int, str] = {}          # objdump's own display labels
     for line in out.stdout.splitlines():
+        lm = _LABEL_RE.match(line)
+        if lm:
+            labels[int(lm.group(1), 16)] = lm.group(2)
+            continue
         m = _DISASM_RE.match(line)
         if not m:
             continue
@@ -117,12 +123,29 @@ def load_binary(elf_path: str, toolchain_prefix: str = "",
         size = int(m.group(10), 16)
         name = m.group(11).strip()
         raw_funcs.append((start, size, name))
-    raw_funcs.sort()
-    for i, (start, size, name) in enumerate(raw_funcs):
+    # aliased symbols (e.g. -msave-restore millicode __riscv_save_4..7)
+    # share one start address: keep ONE Func per start, named after the
+    # label objdump -d itself displays so calls/cfn match the listing.
+    by_start: Dict[int, Tuple[int, str]] = {}
+    for start, size, name in sorted(raw_funcs):
+        cur = by_start.get(start)
+        if cur is None or size > cur[0]:
+            by_start[start] = (size, name)
+    starts = sorted(by_start)
+    for i, start in enumerate(starts):
+        size, name = by_start[start]
+        name = labels.get(start, name)
         end = start + size
         if size == 0:  # size-less symbols: extend to next symbol
-            end = raw_funcs[i + 1][0] if i + 1 < len(raw_funcs) else start + 4
+            end = starts[i + 1] if i + 1 < len(starts) else start + 4
         info.funcs.append(Func(name=name, start=start, end=end))
+    info._starts = [f.start for f in info.funcs]
+
+    # labels objdump shows that have no symtab entry at all
+    for addr, name in labels.items():
+        if addr not in by_start and info.func_at(addr) is None:
+            info.funcs.append(Func(name=name, start=addr, end=addr + 4))
+    info.funcs.sort(key=lambda f: f.start)
     info._starts = [f.start for f in info.funcs]
 
     # --- source line mapping (DWARF) ----------------------------------

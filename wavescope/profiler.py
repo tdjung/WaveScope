@@ -59,6 +59,15 @@ class CallSite:
 
 
 @dataclass
+class IsrCtx:
+    depth: int          # call-stack depth at exception entry
+    resume: int         # architectural resume PC (mepc equivalent)
+
+
+XRET_MNEMONICS = {"mret", "sret", "uret", "eret"}
+
+
+@dataclass
 class FrameCtx:
     func_start: int
     ret_addr: Optional[int]
@@ -76,6 +85,7 @@ class Profile:
         self.calls: Dict[Tuple[int, int, int], CallSite] = defaultdict(CallSite)
         self.total: List[int] = [0] * N_EVENTS
         self.unknown_pcs = 0
+        self.exceptions = 0
 
     # -- accounting ----------------------------------------------------
     def _update(self, pc: int, ev: int, n: int, stack: List[FrameCtx]) -> None:
@@ -86,7 +96,8 @@ class Profile:
 
 
 def run(pc_stream: Iterable[Tuple[int, int]], binary: BinaryInfo,
-        classifier, max_stack: int = 512) -> Profile:
+        classifier, max_stack: int = 512,
+        clamp_exception_cycles: bool = True) -> Profile:
     """Consume (tick, pc) samples and build a Profile.
 
     The stream is treated as the committed-instruction sequence; each new
@@ -98,6 +109,7 @@ def run(pc_stream: Iterable[Tuple[int, int]], binary: BinaryInfo,
     """
     prof = Profile(binary)
     stack: List[FrameCtx] = []
+    isr_ctxs: List[IsrCtx] = []
 
     it: Iterator[Tuple[int, int]] = iter(pc_stream)
     try:
@@ -112,12 +124,38 @@ def run(pc_stream: Iterable[Tuple[int, int]], binary: BinaryInfo,
             return
         cls: InsnClass = classifier.classify(insn)
 
+        fallthrough = pc + insn.size
+        taken = next_pc is not None and next_pc != fallthrough
+
+        # --- exception / interrupt entry ---------------------------------
+        # A non-control-transfer instruction whose successor is not the
+        # fallthrough means the core vectored to a trap handler between
+        # the two commits (incl. wakeup from wfi). Remember the resume PC
+        # (mepc equivalent) and clamp the boundary cycle delta: the gap
+        # may span a wfi sleep, which the simulator convention counts
+        # as a single cycle.
+        can_transfer = cls.is_jump or cls.is_cond_branch or cls.is_return
+        if taken and not can_transfer:
+            isr_ctxs.append(IsrCtx(depth=len(stack), resume=fallthrough))
+            prof.exceptions += 1
+            if clamp_exception_cycles:
+                cycles = min(cycles, 1)
+
         prof._update(pc, E_IR, 1, stack)
         if cycles > 0:
             prof._update(pc, E_CY, cycles, stack)
 
-        fallthrough = pc + insn.size
-        taken = next_pc is not None and next_pc != fallthrough
+        # --- exception / interrupt exit ----------------------------------
+        if next_pc is not None and isr_ctxs and \
+                (insn.mnemonic in XRET_MNEMONICS or
+                 (cls.is_return and next_pc == isr_ctxs[-1].resume)):
+            ctx = isr_ctxs.pop()
+            _unwind_to(prof, stack, min(ctx.depth, len(stack)))
+            if cls.is_jump:
+                prof._update(pc, E_BI, 1, stack)
+                prof._update(pc, E_BIM, 1, stack)
+                prof._update(pc, E_INDJ, 1, stack)
+            return
 
         if cls.is_cond_branch:
             prof._update(pc, E_BC, 1, stack)

@@ -151,8 +151,14 @@ def cmd_profile(args) -> int:
                              valid=args.valid, sample_edge=args.edge,
                              clock_period=args.clock_period,
                              cfg=_wave_cfg(args))
-    prof = run(samples, binary, classifier)
+    prof = run(samples, binary, classifier,
+               clamp_exception_cycles=not args.no_isr_clamp)
 
+    if prof.exceptions:
+        print(f"[wavescope] detected {prof.exceptions} exception/interrupt "
+              f"entries (boundary cycles "
+              f"{'clamped to 1' if not args.no_isr_clamp else 'kept raw'})",
+              file=sys.stderr)
     if prof.unknown_pcs:
         print(f"[wavescope] warning: {prof.unknown_pcs} samples had PCs "
               f"outside the ELF text sections", file=sys.stderr)
@@ -226,6 +232,10 @@ def main(argv=None) -> int:
     pp.add_argument("--toolchain-prefix", default="",
                     help="binutils prefix, e.g. riscv64-unknown-elf-, "
                          "arm-none-eabi-, aarch64-linux-gnu-")
+    pp.add_argument("--no-isr-clamp", action="store_true",
+                    help="charge full raw cycles at exception/interrupt "
+                         "boundaries (default clamps to 1, matching the "
+                         "simulator convention across wfi sleeps)")
     pp.add_argument("--no-lines", action="store_true",
                     help="skip addr2line source mapping (faster)")
     pp.add_argument("-o", "--output", default="callgrind.out.wavescope")
