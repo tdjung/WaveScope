@@ -154,7 +154,8 @@ def run(pc_stream: Iterable[Tuple[int, int]], binary: BinaryInfo,
                 return  # unmatched ret (stack started mid-function)
 
         # --- calls ------------------------------------------------------
-        if cls.is_jump and cls.writes_link and callee_entry:
+        taken_transfer = cls.is_jump or (cls.is_cond_branch and taken)
+        if taken_transfer and cls.writes_link and callee_entry:
             prof._update(pc, E_CALL, 1, stack)
             if len(stack) < max_stack:
                 stack.append(FrameCtx(
@@ -165,7 +166,7 @@ def run(pc_stream: Iterable[Tuple[int, int]], binary: BinaryInfo,
             return
 
         # --- tail calls --------------------------------------------------
-        if cls.is_jump and not cls.writes_link and callee_entry and diff_func:
+        if taken_transfer and not cls.writes_link and callee_entry and diff_func:
             prof._update(pc, E_TAIL, 1, stack)
             if stack:
                 # reuse caller's frame: same return address, new callee

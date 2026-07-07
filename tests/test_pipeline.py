@@ -21,7 +21,7 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from wavescope.classify import RiscvClassifier
+from wavescope.classify import get_classifier
 from wavescope.disasm import BinaryInfo, Func, Insn
 from wavescope.profiler import (E_BC, E_BCM, E_CALL, E_CY, E_DR, E_DW, E_IR,
                                 run)
@@ -109,7 +109,7 @@ class TestProfiler(unittest.TestCase):
             p = os.path.join(d, "t.vcd")
             make_vcd(p)
             samples = list(iter_pc_samples(p, "clk", "pc"))
-        self.prof = run(samples, self.binary, RiscvClassifier())
+        self.prof = run(samples, self.binary, get_classifier("riscv"))
 
     def test_instruction_counts(self):
         sc = self.prof.self_cost

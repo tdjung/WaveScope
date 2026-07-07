@@ -21,6 +21,7 @@ class Insn:
     size: int
     mnemonic: str
     operands: str
+    encoding: Optional[int] = None   # raw instruction bits (listing order)
 
 
 @dataclass
@@ -90,11 +91,16 @@ def load_binary(elf_path: str, toolchain_prefix: str = "",
         addr = int(m.group(1), 16)
         raw = m.group(2).split()
         size = sum(len(b) // 2 for b in raw)
+        try:
+            encoding = int("".join(raw), 16)
+        except ValueError:
+            encoding = None
         mnem = (m.group(3) or "").lower()
-        if not mnem or mnem.startswith("."):
+        if not mnem:
             continue
         info.insns[addr] = Insn(addr=addr, size=size, mnemonic=mnem,
-                                operands=m.group(4).strip())
+                                operands=m.group(4).strip(),
+                                encoding=encoding)
         addrs.append(addr)
 
     # --- function symbols --------------------------------------------
@@ -149,3 +155,25 @@ def _load_lines(info: BinaryInfo, elf_path: str, prefix: str) -> None:
             except ValueError:
                 n = 0
             info.lines[addr] = (fname if fname != "??" else "??", n)
+
+
+def text_ranges(elf_path: str, toolchain_prefix: str = "") -> List[Tuple[int, int]]:
+    """Executable section address ranges [(start, end), ...] via objdump -h."""
+    objdump = _tool(toolchain_prefix, "objdump")
+    out = subprocess.run([objdump, "-h", elf_path],
+                         capture_output=True, text=True, check=True)
+    ranges: List[Tuple[int, int]] = []
+    lines = out.stdout.splitlines()
+    for i, line in enumerate(lines):
+        parts = line.split()
+        if len(parts) >= 7 and parts[0].isdigit():
+            flags = lines[i + 1] if i + 1 < len(lines) else ""
+            if "CODE" in flags:
+                try:
+                    size = int(parts[2], 16)
+                    vma = int(parts[3], 16)
+                    if size:
+                        ranges.append((vma, vma + size))
+                except ValueError:
+                    pass
+    return sorted(ranges)

@@ -1,0 +1,36 @@
+{
+  "isa": "armv7m",
+  "description": "ARM Cortex-M (Thumb / Thumb-2), binutils objdump mnemonics",
+  "insn_sizes": [2, 4],
+  "normalize": { "strip_suffixes": [".w", ".n"] },
+  "cond_suffixes": [
+    "eq", "ne", "cs", "cc", "hs", "lo", "mi", "pl",
+    "vs", "vc", "hi", "ls", "ge", "lt", "gt", "le"
+  ],
+  "classes": {
+    "cond_branch": ["cbz", "cbnz"],
+    "direct_jump": ["b", "bl"],
+    "indirect_jump": ["bx", "blx", "tbb", "tbh"],
+    "load": ["pop", "vpop"],
+    "store": ["push", "vpush"],
+    "return": []
+  },
+  "prefix_classes": {
+    "ldr": ["load"], "ldm": ["load"], "vld": ["load"], "lda": ["load"], "ldc": ["load"],
+    "str": ["store"], "stm": ["store"], "vst": ["store"], "stl": ["store"], "stc": ["store"]
+  },
+  "link": {
+    "convention": "mnemonic",
+    "mnemonics": ["bl", "blx"]
+  },
+  "indirect_if_reg_operand": ["blx"],
+  "return_if_operand": { "bx": ["lr"], "mov": ["pc,lr"] },
+  "pc_write": {
+    "enabled": true,
+    "register": "pc",
+    "return_mnemonic_prefixes": ["pop", "ldm"],
+    "jump_mnemonic_prefixes": ["ldr", "mov", "add"]
+  },
+  "unknown_mnemonics": [".word", ".short", "udf"],
+  "custom_encodings": []
+}

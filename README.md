@@ -30,11 +30,64 @@ Call/return matching drives a shadow call stack, so the output includes
 proper `calls=` / `cfn=` records with **inclusive costs** — the call tree
 in kcachegrind works as expected.
 
+## Supported ISAs
+
+| ISA | `--isa` | Toolchain prefix example |
+|---|---|---|
+| RISC-V RV32/RV64 (incl. C ext) | `riscv` (default) | `riscv64-unknown-elf-` |
+| ARM Cortex-M (Thumb/Thumb-2) | `armv7m` | `arm-none-eabi-` |
+| ARM AArch64 | `aarch64` | `aarch64-linux-gnu-` |
+
+ISA knowledge lives in **data files** (`wavescope/isa/*.json`), not code.
+The classifier is a generic engine interpreting those tables, so adding
+or tweaking an ISA means editing JSON.
+
+### Custom instructions (RISC-V etc.)
+
+Extend a base ISA with an overlay file, repeatable via `--isa-ext`:
+
+```jsonc
+// my_custom.json
+{
+  // case 1: your vendor objdump prints the mnemonic
+  "classes": { "load": ["cust.vld"], "store": ["cust.vst"] },
+
+  // case 2: objdump shows ".word 0x...." -- match by encoding
+  "custom_encodings": [
+    { "name": "cust_dma_ld", "mask": "0x7f", "match": "0x0b",
+      "classes": ["load"], "size": 4 }
+  ]
+}
+```
+
+```sh
+wavescope profile ... --isa riscv --isa-ext my_custom.json
+```
+
+## Waveform formats
+
+| Format | Support |
+|---|---|
+| VCD | native (dependency-free parser) |
+| FSDB | via Synopsys Verdi tools -- see below |
+
+FSDB is a proprietary format with no open-source reader. WaveScope
+auto-detects Verdi utilities (`--verdi-home`, `$VERDI_HOME`, or `$PATH`):
+
+1. **`fsdbreport`** (preferred): dumps only the clk/pc/valid signals as
+   text -- no VCD conversion, fast even for huge dumps.
+2. **`fsdb2vcd`** fallback: converts to VCD first. Use `--fsdb-scope
+   top.soc.cpu0` to convert only the core's scope -- dramatically faster.
+
+Verdi tool flags vary slightly between releases; if the default
+invocation fails, override with `--fsdbreport-args` / `--fsdb2vcd-args`
+(":"-separated).
+
 ## Requirements
 
 - Linux, Python ≥ 3.8 (no Python dependencies)
-- binutils for your target, e.g. `riscv64-unknown-elf-objdump` and
-  `addr2line` (source-line mapping is optional)
+- binutils for your target (`objdump`, optional `addr2line`)
+- for FSDB input: a Verdi installation
 
 ## Install
 
@@ -44,23 +97,45 @@ cd WaveScope
 pip install -e .
 ```
 
-## Usage
+## Usage: two-step workflow
+
+**Step 1 -- find the PC/clock signals.** Real SoC waveforms have
+thousands of signals; `scan` ranks candidates using the ELF:
 
 ```sh
-wavescope \
-    --vcd sim.vcd \
+$ wavescope scan --wave sim.vcd --elf firmware.elf
+
+PC signal candidates:
+  1. top.soc.cpu0.u_wb.wb_pc  [score 0.94]
+       - 99% of values in ELF text sections
+       - 78% sequential strides (+2/4)
+       - name contains 'pc' (wb_pc)
+  ...
+Clock signal candidates:
+  1. top.clk  [score 1.00]
+```
+
+Scoring combines: fraction of values inside the ELF's executable
+sections (strongest), sequential-stride pattern, name hints, and signal
+width. `--json` gives machine-readable output for UI integration.
+
+**Step 2 -- profile with the chosen signals:**
+
+```sh
+wavescope profile \
+    --wave sim.vcd \
     --elf firmware.elf \
     --clock top.clk \
-    --pc top.core.commit_pc \
-    --valid top.core.commit_valid \
-    --toolchain-prefix riscv64-unknown-elf- \
+    --pc top.soc.cpu0.u_wb.wb_pc \
+    --valid top.soc.cpu0.u_wb.wb_valid \
+    --isa armv7m --toolchain-prefix arm-none-eabi- \
     -o callgrind.out.wavescope
 
 qcachegrind callgrind.out.wavescope   # or callgrind_annotate
 ```
 
 Signal names accept a full hierarchical path or any unique suffix
-(`commit_pc` works if only one signal ends with that name).
+(`wb_pc` works if only one signal ends with that name).
 
 ## Choosing the right PC signal
 
@@ -81,12 +156,16 @@ instruction that eventually commits.
 ## Current scope / roadmap
 
 - [x] VCD input (dependency-free parser)
-- [x] RISC-V (RV32/RV64, incl. compressed) classification
+- [x] FSDB input via Verdi tools (fsdbreport / fsdb2vcd)
+- [x] RISC-V, ARM Cortex-M (Thumb-2), AArch64 -- table-driven, JSON data files
+- [x] Custom instruction overlays (mnemonic + encoding matching)
+- [x] `scan`: PC/clock signal candidate discovery
 - [x] Callgrind output with call tree + inclusive costs
-- [ ] FSDB input (via `fsdb2vcd` for now)
-- [ ] Other ISAs (classifier is pluggable — see `wavescope/classify.py`)
+- [ ] FST input (Verilator/GTKWave open format)
+- [ ] Native FSDB reader binding (libnffr via ctypes)
+- [ ] lcov coverage export (`--lcov`) for multi-run merged coverage
 - [ ] Interrupt/exception (`epc`) boundary handling
-- [ ] Multi-hart: one PC signal per hart, merged output
+- [ ] Multi-hart/core: one PC signal per hart, merged output
 
 ## Development
 
