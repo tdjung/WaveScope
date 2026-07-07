@@ -149,6 +149,7 @@ def cmd_profile(args) -> int:
     print(f"[wavescope] reading waveform: {args.wave}", file=sys.stderr)
     samples = open_pc_stream(args.wave, args.clock, args.pc,
                              valid=args.valid, sample_edge=args.edge,
+                             clock_period=args.clock_period,
                              cfg=_wave_cfg(args))
     prof = run(samples, binary, classifier)
 
@@ -205,8 +206,14 @@ def main(argv=None) -> int:
     pp = sub.add_parser("profile", help="generate callgrind output")
     _add_wave_args(pp)
     pp.add_argument("--elf", required=True, help="ELF with debug symbols")
-    pp.add_argument("--clock", required=True,
-                    help="clock signal (full path or unique suffix)")
+    pp.add_argument("--clock", default=None,
+                    help="clock signal (full path or unique suffix). "
+                         "OPTIONAL: without it, cycles are derived from "
+                         "PC change times (period auto-detected via GCD)")
+    pp.add_argument("--clock-period", default=None, metavar="P",
+                    help="cycle length when no clock signal is dumped: "
+                         "plain int = dump time units, or '10ns'/'20000ps' "
+                         "(default: auto-detect)")
     pp.add_argument("--pc", required=True,
                     help="program counter signal (prefer commit-stage PC)")
     pp.add_argument("--valid", default=None,

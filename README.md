@@ -137,6 +137,24 @@ qcachegrind callgrind.out.wavescope   # or callgrind_annotate
 Signal names accept a full hierarchical path or any unique suffix
 (`wb_pc` works if only one signal ends with that name).
 
+### No clock signal in the dump?
+
+`--clock` is optional. Without it, WaveScope derives the cycle grid from
+the PC signal's own change times: every event in an RTL dump sits on a
+multiple of the clock period, so the GCD of the time deltas between PC
+changes converges to the period within a handful of samples. Stalls
+(gaps of N periods) then count as N cycles, exactly as in clocked mode.
+
+This costs nothing extra -- only the PC value-change lines are examined,
+so multi-million-cycle dumps stream at the same speed. If auto-detection
+is not desired, pass `--clock-period 10ns` (or a plain integer in dump
+time units).
+
+Compressed or binary files named `.vcd` are handled transparently:
+gzip/bzip2/xz are decompressed on the fly, and FST/LXT2/VZT are
+converted via the GTKWave-bundled fst2vcd/lxt2vcd/vzt2vcd if present
+in PATH.
+
 ## Choosing the right PC signal
 
 Accuracy depends heavily on **which** PC you tap:

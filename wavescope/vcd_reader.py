@@ -286,3 +286,136 @@ def _vec_to_int(bits: str) -> Optional[int]:
         return int(b, 2)
     except ValueError:
         return None
+
+
+# ----------------------------------------------------------------------
+# Clockless operation: derive cycles from event times
+# ----------------------------------------------------------------------
+def iter_pc_changes(path: str, pc_name: str,
+                    valid_name: Optional[str] = None
+                    ) -> Iterator[Tuple[int, int]]:
+    """Yield (time, pc_value) at each PC value change (no clock needed).
+
+    If valid_name is given, a change is emitted only while valid == 1,
+    and a rising valid edge re-emits the current PC (instruction becomes
+    architecturally valid at that time).
+    """
+    with open_vcd_text(path) as f:
+        signals, _ = read_header(f)
+        pc = find_signal(signals, pc_name)
+        valid = find_signal(signals, valid_name) if valid_name else None
+        pc_id = pc.ident
+        valid_id = valid.ident if valid else None
+
+        t = 0
+        cur_pc: Optional[int] = None
+        cur_valid = 1 if valid_id is None else None
+
+        for raw in f:
+            line = raw.strip()
+            if not line:
+                continue
+            c0 = line[0]
+            if c0 == "#":
+                try:
+                    t = int(line[1:].split()[0])
+                except (ValueError, IndexError):
+                    pass
+            elif c0 in "bB" or c0 in "rR":
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
+                ident = parts[1]
+                if ident == pc_id:
+                    tok = parts[0][1:]
+                    if c0 in "rR":
+                        try:
+                            v: Optional[int] = int(float(tok))
+                        except (ValueError, OverflowError):
+                            v = None
+                    else:
+                        v = _vec_to_int(tok)
+                    if v is not None:
+                        cur_pc = v
+                        if cur_valid == 1:
+                            yield t, v
+                elif valid_id and ident == valid_id:
+                    nv = _vec_to_int(parts[0][1:])
+                    if nv == 1 and cur_valid != 1 and cur_pc is not None:
+                        yield t, cur_pc
+                    cur_valid = nv
+            elif c0 in "01xXzZ":
+                if valid_id and line[1:] == valid_id:
+                    nv = 1 if c0 == "1" else (0 if c0 == "0" else None)
+                    if nv == 1 and cur_valid != 1 and cur_pc is not None:
+                        yield t, cur_pc
+                    cur_valid = nv
+
+
+def parse_period(spec: str, timescale_fs: int) -> int:
+    """'10ns' / '20000ps' / plain int (dump time units) -> dump time units."""
+    s = spec.strip().lower()
+    num = ""
+    i = 0
+    while i < len(s) and (s[i].isdigit() or s[i] == "."):
+        num += s[i]
+        i += 1
+    unit = s[i:].strip()
+    if not unit:
+        return int(float(num))
+    if unit not in _UNIT_FS:
+        raise VcdError(f"unknown time unit '{unit}' in --clock-period")
+    fs = float(num) * _UNIT_FS[unit]
+    units = fs / timescale_fs
+    if units < 1:
+        raise VcdError(f"--clock-period {spec} is below the dump timescale")
+    return int(round(units))
+
+
+def get_timescale(path: str) -> int:
+    with open_vcd_text(path) as f:
+        _, ts = read_header(f)
+    return ts
+
+
+def changes_to_ticks(changes: Iterator[Tuple[int, int]],
+                     period: Optional[int] = None,
+                     warmup: int = 2048,
+                     ) -> Tuple[int, Iterator[Tuple[int, int]]]:
+    """Convert (time, value) changes to (clock_tick, value) samples.
+
+    If period is None it is auto-detected as the GCD of the time deltas
+    of the first `warmup` changes (all RTL events sit on the clock grid,
+    so the GCD converges to the period after a handful of samples).
+    Returns (period_used, sample_iterator).
+    """
+    import itertools
+    import math
+
+    buf: list = []
+    if period is None:
+        prev_t: Optional[int] = None
+        g = 0
+        for t, v in changes:
+            buf.append((t, v))
+            if prev_t is not None and t > prev_t:
+                g = math.gcd(g, t - prev_t)
+            prev_t = t
+            if len(buf) >= warmup and g > 0:
+                break
+        if g == 0:
+            raise VcdError(
+                "cannot auto-detect clock period: fewer than 2 PC value "
+                "changes found. Pass --clock-period explicitly.")
+        period = g
+
+    p = period
+
+    def gen() -> Iterator[Tuple[int, int]]:
+        t0: Optional[int] = None
+        for t, v in itertools.chain(buf, changes):
+            if t0 is None:
+                t0 = t
+            yield round((t - t0) / p), v
+
+    return p, gen()

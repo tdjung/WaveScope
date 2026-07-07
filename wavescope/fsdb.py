@@ -174,3 +174,32 @@ def convert_to_vcd(fsdb: str, tool: str, scope: Optional[str] = None,
             f"fsdb2vcd failed:\n{r.stderr.strip()}\ncmd: {' '.join(cmd)}\n"
             f"(flags vary by Verdi version; override with --fsdb2vcd-args)")
     return out
+
+
+def iter_pc_changes_fsdbreport(fsdb: str, tool: str, pc: str,
+                               valid: Optional[str] = None,
+                               extra_args: Optional[List[str]] = None,
+                               ) -> Iterator[Tuple[int, int]]:
+    """(time, pc) changes without a clock signal, valid-gated if given."""
+    args = extra_args or []
+    pc_vc = _dump_signal(tool, fsdb, to_fsdb_path(pc), args)
+    if not valid:
+        for t, v in pc_vc:
+            if v is not None:
+                yield t, v
+        return
+    val_vc = _dump_signal(tool, fsdb, to_fsdb_path(valid), args)
+    vi = 0
+    cur_valid: Optional[int] = None
+    cur_pc: Optional[int] = None
+    for t, v in pc_vc:
+        while vi < len(val_vc) and val_vc[vi][0] <= t:
+            nv = val_vc[vi][1]
+            if nv == 1 and cur_valid != 1 and cur_pc is not None:
+                yield val_vc[vi][0], cur_pc
+            cur_valid = nv
+            vi += 1
+        if v is not None:
+            cur_pc = v
+            if cur_valid == 1 or cur_valid is None:
+                yield t, v
