@@ -6,15 +6,17 @@ waveform once, gathers cheap statistics per signal, and ranks candidates.
 
 PC scoring (weights sum to 1.0):
   0.55  text-ratio : fraction of sampled values inside the ELF's
-                     executable sections (by far the strongest signal;
-                     requires --elf, otherwise weight is redistributed)
-  0.20  stride     : fraction of consecutive deltas equal to +2/+4
-                     (sequential fetch pattern)
+                     executable sections (strongest; requires --elf)
+  0.20  stride     : fraction of consecutive deltas equal to insn sizes
   0.15  name       : "pc" token, or fetch/commit/retire/instr/addr hints
   0.10  width      : 32- or 64-bit vector
 
 Clock scoring: 1-bit signals ranked by toggle count x period regularity
 x name hints (clk/clock).
+
+Diagnostics: ScanResult keeps per-signal raw stats and global parse
+counters so `wavescope signals` / `scan --explain` can show exactly why
+a signal was or wasn't picked.
 """
 
 from __future__ import annotations
@@ -30,20 +32,25 @@ _NAME_PC_WEAK = ("epc", "iaddr", "instaddr", "instr", "inst", "fetch",
                  "commit", "retire", "wb", "addr")
 _NAME_CLK = ("clk", "clock", "ck")
 
-MAX_TRACKED_VALUES = 4096          # per-signal distinct-value cap
-DEFAULT_MAX_CHANGES = 2_000_000    # global value-change budget
+MAX_TRACKED_VALUES = 4096
+DEFAULT_MAX_CHANGES = 2_000_000
+MIN_CHANGES = 8
+SCORE_FLOOR = 0.05
 
 
 @dataclass
 class SigStats:
     sig: VcdSignal
     changes: int = 0
+    bad_lines: int = 0            # x/z or unparseable values
     prev_int: Optional[int] = None
     stride_hits: int = 0
     stride_total: int = 0
     text_hits: int = 0
     text_total: int = 0
     distinct: set = field(default_factory=set)
+    first_values: List[int] = field(default_factory=list)
+    last_value: Optional[int] = None
     # clock-specific
     last_time: Optional[int] = None
     deltas: Dict[int, int] = field(default_factory=dict)
@@ -59,6 +66,29 @@ class Candidate:
     def to_dict(self) -> dict:
         return {"name": self.name, "width": self.width,
                 "score": round(self.score, 4), "reasons": self.reasons}
+
+
+@dataclass
+class ParseStats:
+    n_signals: int = 0
+    n_vector_tracked: int = 0
+    n_scalar_tracked: int = 0
+    value_lines_seen: int = 0
+    value_lines_matched: int = 0
+    budget_exhausted: bool = False
+
+
+@dataclass
+class ScanResult:
+    pc_candidates: List[Candidate]
+    clock_candidates: List[Candidate]
+    vec_stats: Dict[str, SigStats]     # signal full name -> stats
+    clk_stats: Dict[str, SigStats]
+    parse: ParseStats
+
+    def __iter__(self):                 # allows: pcs, clks = scan(...)
+        yield self.pc_candidates
+        yield self.clock_candidates
 
 
 def _name_score_pc(name: str) -> Tuple[float, Optional[str]]:
@@ -82,22 +112,48 @@ def scan(vcd_path: str,
          top_n: int = 5,
          max_changes: int = DEFAULT_MAX_CHANGES,
          isa_strides: Tuple[int, ...] = (2, 4),
-         ) -> Tuple[List[Candidate], List[Candidate]]:
-    """Returns (pc_candidates, clock_candidates), best first."""
-
+         min_width: int = 8,
+         ) -> ScanResult:
+    ps = ParseStats()
     with open(vcd_path, "r", errors="replace") as f:
         signals, _ = read_header(f)
+        ps.n_signals = len(signals)
 
         vec: Dict[str, SigStats] = {}
         clk: Dict[str, SigStats] = {}
         for s in signals:
-            if s.width >= 16:
+            if s.width >= min_width:
                 vec[s.ident] = SigStats(sig=s)
             elif s.width == 1:
                 clk[s.ident] = SigStats(sig=s)
+        ps.n_vector_tracked = len(vec)
+        ps.n_scalar_tracked = len(clk)
 
         t = 0
         budget = max_changes
+
+        def feed_vector(st: SigStats, v: Optional[int]) -> None:
+            if v is None:
+                st.bad_lines += 1
+                return
+            st.changes += 1
+            if len(st.first_values) < 4:
+                st.first_values.append(v)
+            st.last_value = v
+            if len(st.distinct) < MAX_TRACKED_VALUES:
+                st.distinct.add(v)
+            if st.prev_int is not None:
+                st.stride_total += 1
+                if (v - st.prev_int) in isa_strides:
+                    st.stride_hits += 1
+            st.prev_int = v
+            if text_ranges is not None:
+                st.text_total += 1
+                for lo, hi in text_ranges:
+                    if lo <= v < hi:
+                        st.text_hits += 1
+                        break
+
         for raw in f:
             line = raw.strip()
             if not line:
@@ -105,41 +161,48 @@ def scan(vcd_path: str,
             c0 = line[0]
             if c0 == "#":
                 try:
-                    t = int(line[1:])
-                except ValueError:
+                    t = int(line[1:].split()[0])
+                except (ValueError, IndexError):
                     pass
                 continue
             if c0 in "bB":
-                sp = line.find(" ")
-                if sp < 0:
+                ps.value_lines_seen += 1
+                parts = line.split()
+                if len(parts) < 2:
                     continue
-                st = vec.get(line[sp + 1:])
+                st = vec.get(parts[1])
                 if st is None:
                     continue
-                bits = line[1:sp].lower()
+                ps.value_lines_matched += 1
+                bits = parts[0][1:].lower()
                 if "x" in bits or "z" in bits:
+                    feed_vector(st, None)
+                else:
+                    try:
+                        feed_vector(st, int(bits, 2))
+                    except ValueError:
+                        feed_vector(st, None)
+            elif c0 in "rR":
+                ps.value_lines_seen += 1
+                parts = line.split()
+                if len(parts) < 2:
                     continue
+                st = vec.get(parts[1])
+                if st is None:
+                    continue
+                ps.value_lines_matched += 1
                 try:
-                    v = int(bits, 2)
-                except ValueError:
-                    continue
-                st.changes += 1
-                if len(st.distinct) < MAX_TRACKED_VALUES:
-                    st.distinct.add(v)
-                if st.prev_int is not None:
-                    st.stride_total += 1
-                    if (v - st.prev_int) in isa_strides:
-                        st.stride_hits += 1
-                st.prev_int = v
-                if text_ranges is not None:
-                    st.text_total += 1
-                    for lo, hi in text_ranges:
-                        if lo <= v < hi:
-                            st.text_hits += 1
-                            break
-            elif c0 in "01":
+                    feed_vector(st, int(float(parts[0][1:])))
+                except (ValueError, OverflowError):
+                    feed_vector(st, None)
+            elif c0 in "01xXzZ":
+                ps.value_lines_seen += 1
                 st = clk.get(line[1:])
                 if st is None:
+                    continue
+                ps.value_lines_matched += 1
+                if c0 in "xXzZ":
+                    st.bad_lines += 1
                     continue
                 st.changes += 1
                 if st.last_time is not None:
@@ -148,44 +211,74 @@ def scan(vcd_path: str,
                     if len(st.deltas) > 64:
                         st.deltas.pop(min(st.deltas, key=st.deltas.get))
                 st.last_time = t
+            else:
+                continue
             budget -= 1
             if budget <= 0:
+                ps.budget_exhausted = True
                 break
 
-    # ---- rank PC candidates ------------------------------------------
-    pcs: List[Candidate] = []
+    pcs = _rank_pcs(vec, text_ranges, isa_strides)
+    clks = _rank_clks(clk)
+    return ScanResult(pc_candidates=pcs[:top_n],
+                      clock_candidates=clks[:top_n],
+                      vec_stats={s.sig.name: s for s in vec.values()},
+                      clk_stats={s.sig.name: s for s in clk.values()},
+                      parse=ps)
+
+
+def score_vector(st: SigStats,
+                 have_elf: bool,
+                 isa_strides: Tuple[int, ...]) -> Tuple[float, List[str]]:
+    reasons: List[str] = []
+    text_r = (st.text_hits / st.text_total) if (have_elf and st.text_total) else 0.0
+    stride_r = (st.stride_hits / st.stride_total) if st.stride_total else 0.0
+    name_s, why = _name_score_pc(st.sig.name)
+    width_s = 1.0 if st.sig.width in (32, 64) else \
+        (0.5 if 24 <= st.sig.width <= 64 else 0.0)
+
+    if have_elf:
+        score = 0.55 * text_r + 0.20 * stride_r + 0.15 * name_s + 0.10 * width_s
+        if st.text_total:
+            reasons.append(f"{text_r * 100:.0f}% of values in ELF text sections")
+    else:
+        score = 0.45 * stride_r + 0.35 * name_s + 0.20 * width_s
+    if stride_r > 0.05:
+        reasons.append(f"{stride_r * 100:.0f}% sequential strides "
+                       f"(+{'/'.join(map(str, isa_strides))})")
+    if why:
+        reasons.append(why)
+    reasons.append(f"width={st.sig.width}, {st.changes} changes, "
+                   f"{len(st.distinct)}"
+                   f"{'+' if len(st.distinct) >= MAX_TRACKED_VALUES else ''}"
+                   f" distinct values")
+    return score, reasons
+
+
+def _rank_pcs(vec: Dict[str, SigStats],
+              text_ranges: Optional[List[Tuple[int, int]]],
+              isa_strides: Tuple[int, ...]) -> List[Candidate]:
     have_elf = text_ranges is not None
+    out: List[Candidate] = []
+    fallback: List[Candidate] = []
     for st in vec.values():
-        if st.changes < 8:
+        if st.changes < MIN_CHANGES:
             continue
-        reasons: List[str] = []
-        text_r = (st.text_hits / st.text_total) if (have_elf and st.text_total) else 0.0
-        stride_r = (st.stride_hits / st.stride_total) if st.stride_total else 0.0
-        name_s, why = _name_score_pc(st.sig.name)
-        width_s = 1.0 if st.sig.width in (32, 64) else \
-            (0.5 if 24 <= st.sig.width <= 64 else 0.0)
+        score, reasons = score_vector(st, have_elf, isa_strides)
+        c = Candidate(st.sig.name, st.sig.width, score, reasons)
+        (out if score > SCORE_FLOOR else fallback).append(c)
+    out.sort(key=lambda c: c.score, reverse=True)
+    if not out:                     # nothing above floor: show best anyway
+        fallback.sort(key=lambda c: c.score, reverse=True)
+        return fallback
+    return out
 
-        if have_elf:
-            score = 0.55 * text_r + 0.20 * stride_r + 0.15 * name_s + 0.10 * width_s
-            if text_r > 0:
-                reasons.append(f"{text_r * 100:.0f}% of values in ELF text sections")
-        else:
-            score = 0.45 * stride_r + 0.35 * name_s + 0.20 * width_s
-        if stride_r > 0.05:
-            reasons.append(f"{stride_r * 100:.0f}% sequential strides (+{'/'.join(map(str, isa_strides))})")
-        if why:
-            reasons.append(why)
-        reasons.append(f"width={st.sig.width}, {st.changes} changes, "
-                       f"{len(st.distinct)}{'+' if len(st.distinct) >= MAX_TRACKED_VALUES else ''} distinct values")
-        if score > 0.05:
-            pcs.append(Candidate(st.sig.name, st.sig.width, score, reasons))
-    pcs.sort(key=lambda c: c.score, reverse=True)
 
-    # ---- rank clock candidates ---------------------------------------
-    clks: List[Candidate] = []
+def _rank_clks(clk: Dict[str, SigStats]) -> List[Candidate]:
+    out: List[Candidate] = []
     max_toggles = max((s.changes for s in clk.values()), default=0) or 1
     for st in clk.values():
-        if st.changes < 8:
+        if st.changes < MIN_CHANGES:
             continue
         total_d = sum(st.deltas.values())
         regular = (max(st.deltas.values()) / total_d) if total_d else 0.0
@@ -197,7 +290,54 @@ def scan(vcd_path: str,
             reasons.append(f"{regular * 100:.0f}% regular period")
         if name_s:
             reasons.append("name hints clock")
-        clks.append(Candidate(st.sig.name, 1, score, reasons))
-    clks.sort(key=lambda c: c.score, reverse=True)
+        out.append(Candidate(st.sig.name, 1, score, reasons))
+    out.sort(key=lambda c: c.score, reverse=True)
+    return out
 
-    return pcs[:top_n], clks[:top_n]
+
+def explain(result: ScanResult, pattern: str,
+            text_ranges: Optional[List[Tuple[int, int]]],
+            isa_strides: Tuple[int, ...] = (2, 4)) -> str:
+    """Human-readable breakdown of how `pattern`'s signal was scored."""
+    pool = {**result.vec_stats, **result.clk_stats}
+    matches = [n for n in pool
+               if n == pattern or n.endswith("." + pattern) or pattern in n]
+    if not matches:
+        return (f"signal '{pattern}' not found among {len(pool)} parsed "
+                f"signals.\nThe VCD header may use an unexpected $var "
+                f"form -- run 'wavescope signals' to list what was parsed.")
+    lines = []
+    for name in matches[:5]:
+        st = pool[name]
+        lines.append(f"signal: {name}  (width={st.sig.width}, "
+                     f"id='{st.sig.ident}')")
+        lines.append(f"  value changes parsed : {st.changes}")
+        lines.append(f"  unparseable/x/z lines: {st.bad_lines}")
+        if st.changes == 0:
+            lines.append("  -> no value changes were parsed for this signal.")
+            lines.append("     Its value lines are probably in a format the "
+                         "parser doesn't recognize;")
+            lines.append("     please share a few raw lines: "
+                         f"grep -m5 -F \" {st.sig.ident}\" <file>.vcd")
+            continue
+        if st.sig.width == 1:
+            lines.append(f"  (1-bit signal: evaluated as clock candidate)")
+            continue
+        if st.first_values:
+            fv = ", ".join(f"0x{v:x}" for v in st.first_values)
+            lines.append(f"  first values         : {fv}")
+        if st.last_value is not None:
+            lines.append(f"  last value           : 0x{st.last_value:x}")
+        if text_ranges is not None and st.text_total:
+            r = st.text_hits / st.text_total
+            lines.append(f"  in ELF text range    : {r * 100:.1f}% "
+                         f"({st.text_hits}/{st.text_total})")
+        if st.stride_total:
+            r = st.stride_hits / st.stride_total
+            lines.append(f"  sequential strides   : {r * 100:.1f}%")
+        score, _ = score_vector(st, text_ranges is not None, isa_strides)
+        lines.append(f"  final score          : {score:.3f} "
+                     f"(floor {SCORE_FLOOR}, min changes {MIN_CHANGES})")
+        if st.changes < MIN_CHANGES:
+            lines.append(f"  -> EXCLUDED: fewer than {MIN_CHANGES} changes")
+    return "\n".join(lines)

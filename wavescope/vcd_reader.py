@@ -53,15 +53,22 @@ def read_header(f: io.TextIOBase) -> Tuple[List[VcdSignal], int]:
             _consume_until_end(tok_iter)
         elif tok == "$var":
             next(tok_iter)                     # var type (wire/reg/...)
-            width = int(next(tok_iter))
+            try:
+                width = int(next(tok_iter))
+            except ValueError:
+                _consume_until_end(tok_iter)
+                continue
             ident = next(tok_iter)
             name_parts = []
             for t in tok_iter:
                 if t == "$end":
                     break
                 name_parts.append(t)
-            # name may be "pc [31:0]" -> keep base name only
+            # name may be "pc [31:0]" or "pc[31:0]" -> keep base name only
             base = name_parts[0] if name_parts else "?"
+            br = base.find("[")
+            if br > 0:
+                base = base[:br]
             full = ".".join(scope + [base])
             signals.append(VcdSignal(ident=ident, name=full, width=width))
         elif tok == "$timescale":
@@ -169,14 +176,20 @@ def iter_pc_samples(path: str, clock_name: str, pc_name: str,
                             tick += 1
                         prev_clk = v
             elif c0 in "bB":
-                sp = line.find(" ")
-                if sp < 0:
+                parts = line.split()
+                if len(parts) < 2:
                     continue
-                ident = line[sp + 1:]
+                ident = parts[1]
                 if ident in cur:
-                    cur[ident] = line[1:sp]
+                    cur[ident] = parts[0][1:]
             elif c0 in "rR":
-                continue  # real values: not applicable to pc/clk
+                # some ISS dumps emit integer-valued signals as reals
+                parts = line.split()
+                if len(parts) >= 2 and parts[1] in cur:
+                    try:
+                        cur[parts[1]] = bin(int(float(parts[0][1:])))[2:]
+                    except (ValueError, OverflowError):
+                        pass
             elif c0 == "$":
                 continue  # $dumpvars / $end blocks; value lines inside are handled above
 

@@ -81,3 +81,65 @@ class TestScan(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDialects(unittest.TestCase):
+    """ISS-style VCD dialects: tabs, real values, glued vector ranges."""
+
+    def _write(self, path, body):
+        with open(path, "w") as f:
+            f.write(body)
+
+    def test_tab_and_glued_range(self):
+        body = (
+            "$timescale 1ns $end\n"
+            "$scope module sim $end\n"
+            "$var reg 32 @ pc[31:0] $end\n"
+            "$var wire 1 ! clk $end\n"
+            "$upscope $end\n$enddefinitions $end\n"
+        )
+        pc = 0x8000_0000
+        for i in range(40):
+            body += f"#{i*10}\n0!\n#{i*10+5}\nb{pc:b}\t@\n1!\n"
+            pc += 4
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "t.vcd")
+            self._write(p, body)
+            res = scan(p, text_ranges=TEXT)
+        self.assertTrue(res.pc_candidates)
+        self.assertTrue(res.pc_candidates[0].name.endswith("pc"))
+        st = res.vec_stats["sim.pc"]
+        self.assertEqual(st.changes, 40)
+
+    def test_real_valued_pc(self):
+        body = (
+            "$timescale 1ns $end\n"
+            "$scope module sim $end\n"
+            "$var real 64 @ pc $end\n"
+            "$upscope $end\n$enddefinitions $end\n"
+        )
+        pc = 0x8000_0000
+        for i in range(40):
+            body += f"#{i*10}\nr{float(pc):.1f} @\n"
+            pc += 4
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "t.vcd")
+            self._write(p, body)
+            res = scan(p, text_ranges=TEXT)
+        self.assertTrue(res.pc_candidates, "real-valued pc not detected")
+        st = res.vec_stats["sim.pc"]
+        self.assertEqual(st.changes, 40)
+        self.assertEqual(st.first_values[0], 0x8000_0000)
+
+    def test_explain_and_parse_stats(self):
+        from wavescope.scan import explain
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, "s.vcd")
+            make_vcd(p)
+            res = scan(p, text_ranges=TEXT)
+        self.assertGreater(res.parse.value_lines_matched, 0)
+        out = explain(res, "dbg_addr", TEXT)
+        self.assertIn("in ELF text range", out)
+        self.assertIn("final score", out)
+        out2 = explain(res, "no_such_signal_xyz", TEXT)
+        self.assertIn("not found", out2)

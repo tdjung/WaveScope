@@ -24,7 +24,7 @@ from .callgrind import write as write_callgrind
 from .classify import get_classifier, load_isa_spec
 from .disasm import load_binary, text_ranges
 from .profiler import EVENTS, run
-from .scan import scan as scan_signals
+from .scan import explain as explain_signal, scan as scan_signals
 from .waveform import WaveConfig, open_pc_stream, prepare_for_scan
 
 
@@ -67,9 +67,27 @@ def cmd_scan(args) -> int:
         strides = tuple(load_isa_spec(args.isa).get("insn_sizes", [2, 4]))
 
     vcd = prepare_for_scan(args.wave, _wave_cfg(args))
-    pcs, clks = scan_signals(vcd, text_ranges=ranges, top_n=args.top,
-                             max_changes=args.max_changes,
-                             isa_strides=strides)
+    res = scan_signals(vcd, text_ranges=ranges, top_n=args.top,
+                       max_changes=args.max_changes,
+                       isa_strides=strides)
+    pcs, clks = res.pc_candidates, res.clock_candidates
+
+    p = res.parse
+    print(f"[wavescope] parsed {p.n_signals} signals "
+          f"({p.n_vector_tracked} vectors >=8b, {p.n_scalar_tracked} scalars); "
+          f"value lines seen={p.value_lines_seen}, matched={p.value_lines_matched}"
+          + (" [budget exhausted, increase --max-changes]"
+             if p.budget_exhausted else ""),
+          file=sys.stderr)
+    if p.value_lines_matched == 0:
+        print("[wavescope] WARNING: no value changes matched any tracked "
+              "signal -- the VCD value-change section may use an "
+              "unrecognized dialect. Run 'wavescope signals --wave ...' "
+              "and share the output.", file=sys.stderr)
+
+    if args.explain:
+        print(explain_signal(res, args.explain, ranges, strides))
+        return 0
 
     if args.json:
         print(json.dumps({"pc_candidates": [c.to_dict() for c in pcs],
@@ -93,6 +111,29 @@ def cmd_scan(args) -> int:
               f"--elf {args.elf or '<elf>'} \\\n"
               f"      --clock {clks[0].name} --pc {pcs[0].name} "
               f"[--valid <commit_valid>] -o callgrind.out.wavescope")
+    return 0
+
+
+def cmd_signals(args) -> int:
+    from .vcd_reader import read_header
+    vcd = prepare_for_scan(args.wave, _wave_cfg(args))
+    with open(vcd, "r", errors="replace") as f:
+        signals, ts = read_header(f)
+    shown = 0
+    for s in signals:
+        if args.grep and args.grep.lower() not in s.name.lower():
+            continue
+        print(f"{s.width:>5}  {s.name}   (id='{s.ident}')")
+        shown += 1
+    print(f"\n{shown} shown / {len(signals)} total signals; "
+          f"timescale={ts} fs", file=sys.stderr)
+    if shown == 0 and signals:
+        print("no match -- try without --grep", file=sys.stderr)
+    elif not signals:
+        print("NO signals parsed from the header. The $var declarations "
+              "use a form the parser doesn't understand -- please share "
+              "the first ~40 lines of the file (head -40 file.vcd).",
+              file=sys.stderr)
     return 0
 
 
@@ -149,7 +190,17 @@ def main(argv=None) -> int:
                     help="value-change budget for sampling large waveforms")
     ps.add_argument("--json", action="store_true",
                     help="machine-readable output (for UI integration)")
+    ps.add_argument("--explain", default=None, metavar="SIGNAL",
+                    help="show the full scoring breakdown for one signal "
+                         "(exact name, suffix, or substring)")
     ps.set_defaults(func=cmd_scan)
+
+    pl = sub.add_parser("signals",
+                        help="list every signal parsed from the waveform")
+    _add_wave_args(pl)
+    pl.add_argument("--grep", default=None,
+                    help="only show signals whose name contains this")
+    pl.set_defaults(func=cmd_signals)
 
     pp = sub.add_parser("profile", help="generate callgrind output")
     _add_wave_args(pp)
