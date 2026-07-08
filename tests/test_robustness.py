@@ -25,17 +25,30 @@ def linear_binary():
 
 class TestCycleCarry(unittest.TestCase):
     def test_same_timestamp_block(self):
-        """ISS dumps 4 insns at t=0, then time jumps to 4: Cy total must
-        equal the tick span (4) with every insn charged >= 1."""
+        """ISS dumps 4 insns at t=0: each still costs >= 1 cycle, and
+        the floor is LOCAL -- later real deltas are never consumed to
+        repay it (that would erase genuine stall attribution)."""
         trace = [(0, 0x1000), (0, 0x1004), (0, 0x1008), (0, 0x100c),
                  (4, 0x1010), (5, 0x1014), (6, 0x1018)]
         prof = run(iter(trace), linear_binary(), get_classifier("riscv"))
         self.assertEqual(prof.total[E_IR], 7)
         for pc in (0x1000, 0x1004, 0x1008):
             self.assertEqual(prof.self_cost[pc][E_CY], 1)
-        # 4th insn reclaims the deficit: raw 4 + carry(-3) = 1
-        self.assertEqual(prof.self_cost[0x100c][E_CY], 1)
+        # 4th insn keeps its REAL delta of 4 (no debt repayment)
+        self.assertEqual(prof.self_cost[0x100c][E_CY], 4)
         self.assertGreaterEqual(prof.total[E_CY], prof.total[E_IR])
+
+    def test_stalls_survive_earlier_bursts(self):
+        """Field case: sw with stalls (delta 2-3) AFTER a same-timestamp
+        burst region must keep its stall cycles -- previously a carried
+        deficit clamped them all to 1 (Cy == Ir symptom)."""
+        # burst of 3 zero-deltas, then per-insn deltas 3,1,2
+        trace = [(0, 0x1000), (0, 0x1004), (0, 0x1008),
+                 (1, 0x100c), (4, 0x1010), (5, 0x1014), (7, 0x1018)]
+        prof = run(iter(trace), linear_binary(), get_classifier("riscv"))
+        self.assertEqual(prof.self_cost[0x100c][E_CY], 3)   # stall kept
+        self.assertEqual(prof.self_cost[0x1010][E_CY], 1)
+        self.assertEqual(prof.self_cost[0x1014][E_CY], 2)   # stall kept
 
     def test_cy_never_below_ir(self):
         trace = [(0, 0x1000), (0, 0x1004), (0, 0x1008), (0, 0x100c),

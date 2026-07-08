@@ -160,6 +160,20 @@ def cmd_profile(args) -> int:
               f"entries (boundary cycles "
               f"{'clamped to 1' if not args.no_isr_clamp else 'kept raw'})",
               file=sys.stderr)
+    if prof.healed_returns or prof.unmatched_returns:
+        print(f"[wavescope] returns: {prof.healed_returns} healed, "
+              f"{prof.unmatched_returns} unmatched", file=sys.stderr)
+    if prof.drained_frames:
+        print(f"[wavescope] {prof.drained_frames} frames alive at end of "
+              f"trace; top by accumulated Ir:", file=sys.stderr)
+        for call_pc, callee, ir in prof.drained_top:
+            cf = binary.func_at(callee)
+            name = cf.name if cf else hex(callee)
+            print(f"[wavescope]   call@0x{call_pc:x} -> {name}: "
+                  f"Ir={ir}", file=sys.stderr)
+        print("[wavescope]   (large values here = leaked frames whose "
+              "inclusive costs absorbed the rest of the run)",
+              file=sys.stderr)
     if prof.unknown_pcs:
         print(f"[wavescope] warning: {prof.unknown_pcs} samples had PCs "
               f"outside the ELF text sections", file=sys.stderr)

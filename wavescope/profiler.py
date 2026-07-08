@@ -58,6 +58,29 @@ class CallSite:
     inclusive: List[int] = field(default_factory=lambda: [0] * N_EVENTS)
 
 
+_LOOP_SCAN_DEPTH = 64
+
+
+def _close_loop_if_reentry(prof: "Profile", stack: List["FrameCtx"],
+                           entry: int) -> bool:
+    """Loop closure: a transfer back to an entry whose TAIL frame is
+    already on the stack (a loop whose body crosses asm-label/function
+    boundaries) must not push a new frame every iteration -- that stacks
+    one frame per iteration, each accumulating all remaining iterations,
+    blowing inclusive sums up quadratically. Instead, flush the tail
+    frames opened since that entry (per-iteration arcs keep correct,
+    bounded costs) and keep re-using the original frame."""
+    lo = max(0, len(stack) - _LOOP_SCAN_DEPTH)
+    for i in range(len(stack) - 1, lo - 1, -1):
+        fr = stack[i]
+        if not fr.is_tail:
+            return False          # a real call intervenes: not a loop edge
+        if fr.func_start == entry:
+            _unwind_to(prof, stack, i + 1)
+            return True
+    return False
+
+
 def _push_frame(prof: "Profile", stack: List["FrameCtx"],
                 isr_ctxs: List["IsrCtx"], frame: "FrameCtx",
                 max_stack: int) -> None:
@@ -98,6 +121,10 @@ class Profile:
         self.total: List[int] = [0] * N_EVENTS
         self.unknown_pcs = 0
         self.exceptions = 0
+        self.healed_returns = 0
+        self.unmatched_returns = 0
+        self.drained_frames = 0
+        self.drained_top: List[Tuple[int, int, int]] = []  # (call_pc, callee, acc_ir)
 
     # -- accounting ----------------------------------------------------
     def _update(self, pc: int, ev: int, n: int, stack: List[FrameCtx]) -> None:
@@ -253,7 +280,9 @@ def run(pc_stream: Iterable[Tuple[int, int]], binary: BinaryInfo,
                             _unwind_to(prof, stack, j)
                             for c in isr_ctxs:
                                 c.depth = min(c.depth, len(stack))
+                            prof.healed_returns += 1
                             return
+                prof.unmatched_returns += 1
                 return
 
         # --- calls ------------------------------------------------------
@@ -270,6 +299,8 @@ def run(pc_stream: Iterable[Tuple[int, int]], binary: BinaryInfo,
         # --- tail calls --------------------------------------------------
         if taken_transfer and not cls.writes_link and callee_entry and diff_func:
             prof._update(pc, E_TAIL, 1, stack)
+            if _close_loop_if_reentry(prof, stack, next_pc):
+                return
             if stack:
                 _push_frame(prof, stack, isr_ctxs, FrameCtx(
                     func_start=next_pc,
@@ -289,6 +320,8 @@ def run(pc_stream: Iterable[Tuple[int, int]], binary: BinaryInfo,
         # inclusive invariant for leaves. No E_TAIL event is charged --
         # this is control-flow bookkeeping, not an executed jump.
         if next_pc == fallthrough and callee_entry and diff_func:
+            if _close_loop_if_reentry(prof, stack, next_pc):
+                return
             _push_frame(prof, stack, isr_ctxs, FrameCtx(
                 func_start=next_pc,
                 ret_addr=stack[-1].ret_addr if stack else None,
@@ -297,13 +330,14 @@ def run(pc_stream: Iterable[Tuple[int, int]], binary: BinaryInfo,
                 is_tail=True), max_stack)
             return
 
-    # Per-commit cycle floor with conservation: coarse-time dumps (ISS
+    # Per-commit cycle floor, LOCAL only: coarse-time dumps (ISS
     # advancing time per block) put several PC changes on one timestamp,
-    # yielding zero tick deltas. Each committed instruction costs at
-    # least 1 cycle; the deficit is carried and reclaimed from the next
-    # positive delta, so total Cy still matches the tick span (and the
-    # Cy >= Ir invariant holds).
-    carry = 0
+    # yielding zero tick deltas; each committed instruction still costs
+    # at least 1 cycle. Deliberately NOT conserved globally -- a carried
+    # deficit would silently swallow real stall deltas for a long
+    # stretch afterwards, destroying exactly the per-instruction stall
+    # attribution profiling exists for. Trade-off: total Cy exceeds the
+    # raw tick span by the size of the same-timestamp bursts.
     while True:
         try:
             tick, pc = next(it)
@@ -314,15 +348,15 @@ def run(pc_stream: Iterable[Tuple[int, int]], binary: BinaryInfo,
             # stall: same instruction held across ticks -> defer commit
             # (cycle delta keeps growing via tick difference)
             continue
-        raw = (tick - prev_tick) + carry
-        if raw < 1:
-            cycles, carry = 1, raw - 1
-        else:
-            cycles, carry = raw, 0
-        commit(prev_pc, cycles, pc)
+        commit(prev_pc, max(1, tick - prev_tick), pc)
         prev_tick, prev_pc = tick, pc
 
-    # drain remaining frames (program ended inside calls)
+    # drain remaining frames (program ended inside calls) -- large
+    # accumulations here indicate leaked frames worth investigating
+    prof.drained_frames = len(stack)
+    prof.drained_top = sorted(
+        ((fr.call_pc or 0, fr.callee_start or fr.func_start, fr.acc[E_IR])
+         for fr in stack), key=lambda x: -x[2])[:5]
     _unwind_to(prof, stack, 0)
     return prof
 
