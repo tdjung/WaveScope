@@ -13,7 +13,8 @@ from .disasm import BinaryInfo
 from .profiler import EVENTS, N_EVENTS, Profile
 
 
-def write(prof: Profile, out: TextIO, binary_path: str, cmd: str = "") -> None:
+def write(prof: Profile, out: TextIO, binary_path: str, cmd: str = "",
+          all_functions: bool = True) -> None:
     b: BinaryInfo = prof.binary
 
     out.write("# callgrind format\n")
@@ -46,7 +47,11 @@ def write(prof: Profile, out: TextIO, binary_path: str, cmd: str = "") -> None:
 
     out.write(f"ob={binary_path}\n\n")
 
-    for fstart in sorted(set(list(by_func) + list(calls_by_func))):
+    emit_starts = set(list(by_func) + list(calls_by_func))
+    if all_functions:
+        emit_starts.update(f.start for f in b.funcs)
+
+    for fstart in sorted(emit_starts):
         pcs = sorted(by_func.get(fstart, []))
         first_pc = pcs[0] if pcs else fstart
         fl, _ = b.line_at(first_pc)
@@ -54,6 +59,14 @@ def write(prof: Profile, out: TextIO, binary_path: str, cmd: str = "") -> None:
         out.write(f"fn={fname(fstart)}\n")
 
         call_pcs = {cp: callee for cp, callee in calls_by_func.get(fstart, [])}
+
+        if not pcs and not call_pcs:
+            # never executed: keep the function visible (coverage view,
+            # function-count parity with simulator output) at zero cost
+            _, line = b.line_at(fstart)
+            out.write(f"0x{fstart:x} {line} "
+                      f"{' '.join('0' for _ in range(N_EVENTS))}\n\n")
+            continue
 
         for pc in pcs:
             _, line = b.line_at(pc)

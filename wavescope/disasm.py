@@ -61,6 +61,32 @@ _SYM_RE = re.compile(
     r"^([0-9a-fA-F]+)\s+([lgw!\s])([w\s])([C\s])([W\s])([Ii\s])([dD\s])([FfO\s])\s+(\S+)\s+([0-9a-fA-F]+)\s+(.*)$")
 
 
+def strip_params(name: str) -> str:
+    """Drop the parameter list a demangler appends: 'foo(unsigned long)'
+    -> 'foo', 'ns::bar(int, char*) const' -> 'ns::bar'. Keeps operator
+    names intact ('operator()(int)' -> 'operator()')."""
+    s = name.strip()
+    # trailing qualifiers after the arg list
+    for suf in (" const", " volatile", " &", " &&"):
+        if s.endswith(suf):
+            s = s[: -len(suf)]
+    if not s.endswith(")"):
+        return s
+    depth = 0
+    for i in range(len(s) - 1, -1, -1):
+        if s[i] == ")":
+            depth += 1
+        elif s[i] == "(":
+            depth -= 1
+            if depth == 0:
+                head = s[:i]
+                # operator() / operator(): keep the parens that ARE the name
+                if head.endswith("operator"):
+                    return s
+                return head or s
+    return s
+
+
 def _tool(prefix: str, name: str) -> str:
     cand = f"{prefix}{name}" if prefix else name
     if shutil.which(cand):
@@ -86,7 +112,7 @@ def load_binary(elf_path: str, toolchain_prefix: str = "",
     for line in out.stdout.splitlines():
         lm = _LABEL_RE.match(line)
         if lm:
-            labels[int(lm.group(1), 16)] = lm.group(2)
+            labels[int(lm.group(1), 16)] = strip_params(lm.group(2))
             continue
         m = _DISASM_RE.match(line)
         if not m:
@@ -118,7 +144,7 @@ def load_binary(elf_path: str, toolchain_prefix: str = "",
             continue
         start = int(m.group(1), 16)
         size = int(m.group(10), 16)
-        name = m.group(11).strip()
+        name = strip_params(m.group(11).strip())
         raw_funcs.append((start, size, name))
     # aliased symbols (e.g. -msave-restore millicode __riscv_save_4..7)
     # share one start address: keep ONE Func per start, named after the

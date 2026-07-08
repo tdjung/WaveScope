@@ -168,8 +168,16 @@ def cmd_profile(args) -> int:
               "treated as stalls. For accurate results use a commit-stage "
               "PC qualified by a commit-valid signal.", file=sys.stderr)
 
+    executed = {f.start for pc in prof.self_cost
+                for f in [binary.func_at(pc)] if f}
+    print(f"[wavescope] functions: {len(binary.funcs)} in ELF, "
+          f"{len(executed)} executed"
+          + ("" if args.executed_only else " (emitting all)"),
+          file=sys.stderr)
+
     with open(args.output, "w") as f:
-        write_callgrind(prof, f, args.elf, cmd=" ".join(sys.argv[1:]))
+        write_callgrind(prof, f, args.elf, cmd=" ".join(sys.argv[1:]),
+                        all_functions=not args.executed_only)
 
     totals = ", ".join(f"{n}={v}" for n, v in zip(EVENTS, prof.total))
     print(f"[wavescope] totals: {totals}", file=sys.stderr)
@@ -233,6 +241,10 @@ def main(argv=None) -> int:
     pp.add_argument("--toolchain-prefix", default="",
                     help="binutils prefix, e.g. riscv64-unknown-elf-, "
                          "arm-none-eabi-, aarch64-linux-gnu-")
+    pp.add_argument("--executed-only", action="store_true",
+                    help="emit only executed functions (default emits every "
+                         "ELF function, unexecuted ones at zero cost, for "
+                         "coverage views and simulator parity)")
     pp.add_argument("--no-demangle", action="store_true",
                     help="keep mangled C++/Rust symbol names "
                          "(default: demangle via objdump -C)")

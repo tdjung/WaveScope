@@ -250,6 +250,25 @@ def run(pc_stream: Iterable[Tuple[int, int]], binary: BinaryInfo,
                     is_tail=True))
             return
 
+        # --- fall-through into another function ---------------------------
+        # No jump at all, but the next PC is a different function's entry
+        # (millicode chains like __riscv_restore_8 -> _4 -> _0, cold/hot
+        # split code, hand-written asm). Model it as an implicit tail
+        # transfer so the entered function receives a proper incoming arc:
+        # otherwise its self cost (every traversal) exceeds its incoming
+        # inclusive (direct entries only), which breaks the self ==
+        # inclusive invariant for leaves. No E_TAIL event is charged --
+        # this is control-flow bookkeeping, not an executed jump.
+        if next_pc == fallthrough and callee_entry and diff_func:
+            if len(stack) < max_stack:
+                stack.append(FrameCtx(
+                    func_start=next_pc,
+                    ret_addr=stack[-1].ret_addr if stack else None,
+                    call_pc=pc,
+                    callee_start=next_pc,
+                    is_tail=True))
+            return
+
     while True:
         try:
             tick, pc = next(it)
