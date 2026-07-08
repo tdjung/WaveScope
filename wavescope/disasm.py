@@ -146,29 +146,33 @@ def load_binary(elf_path: str, toolchain_prefix: str = "",
         size = int(m.group(10), 16)
         name = strip_params(m.group(11).strip())
         raw_funcs.append((start, size, name))
-    # aliased symbols (e.g. -msave-restore millicode __riscv_save_4..7)
-    # share one start address: keep ONE Func per start, named after the
-    # label objdump -d itself displays so calls/cfn match the listing.
+    # Function universe = every label objdump -d prints (this includes
+    # .S routines lacking .type/.size, hence absent from F-flagged
+    # symtab entries) UNION F-flagged symbols. Aliased symbols sharing
+    # one start (e.g. -msave-restore __riscv_save_4..7) collapse to a
+    # single Func named after the label objdump itself displays, so
+    # calls/cfn match the listing. Every range is capped at the next
+    # known start: a sized symbol must never swallow a following asm
+    # routine that the symbol table does not describe.
     by_start: Dict[int, Tuple[int, str]] = {}
     for start, size, name in sorted(raw_funcs):
         cur = by_start.get(start)
         if cur is None or size > cur[0]:
             by_start[start] = (size, name)
+    for addr, name in labels.items():
+        if addr not in by_start:
+            by_start[addr] = (0, name)
     starts = sorted(by_start)
     for i, start in enumerate(starts):
         size, name = by_start[start]
         name = labels.get(start, name)
-        end = start + size
-        if size == 0:  # size-less symbols: extend to next symbol
-            end = starts[i + 1] if i + 1 < len(starts) else start + 4
-        info.funcs.append(Func(name=name, start=start, end=end))
-    info._starts = [f.start for f in info.funcs]
-
-    # labels objdump shows that have no symtab entry at all
-    for addr, name in labels.items():
-        if addr not in by_start and info.func_at(addr) is None:
-            info.funcs.append(Func(name=name, start=addr, end=addr + 4))
-    info.funcs.sort(key=lambda f: f.start)
+        nxt = starts[i + 1] if i + 1 < len(starts) else None
+        end = start + size if size else (nxt if nxt is not None else start + 4)
+        if nxt is not None:
+            end = min(end, nxt) if size else end
+            if end <= start:
+                end = nxt
+        info.funcs.append(Func(name=name, start=start, end=max(end, start + 2)))
     info._starts = [f.start for f in info.funcs]
 
     # --- source line mapping (DWARF) ----------------------------------

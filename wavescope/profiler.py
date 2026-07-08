@@ -58,6 +58,17 @@ class CallSite:
     inclusive: List[int] = field(default_factory=lambda: [0] * N_EVENTS)
 
 
+def _push_frame(prof: "Profile", stack: List["FrameCtx"],
+                isr_ctxs: List["IsrCtx"], frame: "FrameCtx",
+                max_stack: int) -> None:
+    if len(stack) >= max_stack:
+        _flush_call(prof, stack, 0)
+        del stack[0]
+        for c in isr_ctxs:
+            c.depth = max(0, c.depth - 1)
+    stack.append(frame)
+
+
 @dataclass
 class IsrCtx:
     depth: int                    # call-stack depth at exception entry
@@ -97,7 +108,7 @@ class Profile:
 
 
 def run(pc_stream: Iterable[Tuple[int, int]], binary: BinaryInfo,
-        classifier, max_stack: int = 512,
+        classifier, max_stack: int = 4096,
         clamp_exception_cycles: bool = True) -> Profile:
     """Consume (tick, pc) samples and build a Profile.
 
@@ -224,30 +235,48 @@ def run(pc_stream: Iterable[Tuple[int, int]], binary: BinaryInfo,
                     _unwind_to(prof, stack, j)
                     return
             if cls.is_return:
-                return  # unmatched ret (stack started mid-function)
+                # Unmatched ret: exact link addresses can desync (frames
+                # opened before profiling started, mid-function entry,
+                # missed transfers). Heal like the simulator does: if we
+                # are returning INTO the function that called some frame
+                # on the stack, unwind to that frame -- otherwise stale
+                # frames pile up forever and their inclusive costs
+                # accumulate the rest of the program.
+                nf = binary.func_at(next_pc)
+                if nf is not None:
+                    for i in range(len(stack) - 1, -1, -1):
+                        cp = stack[i].call_pc
+                        if cp is not None and binary.func_at(cp) is nf:
+                            j = i
+                            while j > 0 and stack[j].is_tail:
+                                j -= 1
+                            _unwind_to(prof, stack, j)
+                            for c in isr_ctxs:
+                                c.depth = min(c.depth, len(stack))
+                            return
+                return
 
         # --- calls ------------------------------------------------------
         taken_transfer = cls.is_jump or (cls.is_cond_branch and taken)
         if taken_transfer and cls.writes_link and callee_entry:
             prof._update(pc, E_CALL, 1, stack)
-            if len(stack) < max_stack:
-                stack.append(FrameCtx(
-                    func_start=next_pc,
-                    ret_addr=fallthrough,
-                    call_pc=pc,
-                    callee_start=next_pc))
+            _push_frame(prof, stack, isr_ctxs, FrameCtx(
+                func_start=next_pc,
+                ret_addr=fallthrough,
+                call_pc=pc,
+                callee_start=next_pc), max_stack)
             return
 
         # --- tail calls --------------------------------------------------
         if taken_transfer and not cls.writes_link and callee_entry and diff_func:
             prof._update(pc, E_TAIL, 1, stack)
-            if stack and len(stack) < max_stack:
-                stack.append(FrameCtx(
+            if stack:
+                _push_frame(prof, stack, isr_ctxs, FrameCtx(
                     func_start=next_pc,
                     ret_addr=stack[-1].ret_addr,   # returns to original caller
                     call_pc=pc,
                     callee_start=next_pc,
-                    is_tail=True))
+                    is_tail=True), max_stack)
             return
 
         # --- fall-through into another function ---------------------------
@@ -260,15 +289,21 @@ def run(pc_stream: Iterable[Tuple[int, int]], binary: BinaryInfo,
         # inclusive invariant for leaves. No E_TAIL event is charged --
         # this is control-flow bookkeeping, not an executed jump.
         if next_pc == fallthrough and callee_entry and diff_func:
-            if len(stack) < max_stack:
-                stack.append(FrameCtx(
-                    func_start=next_pc,
-                    ret_addr=stack[-1].ret_addr if stack else None,
-                    call_pc=pc,
-                    callee_start=next_pc,
-                    is_tail=True))
+            _push_frame(prof, stack, isr_ctxs, FrameCtx(
+                func_start=next_pc,
+                ret_addr=stack[-1].ret_addr if stack else None,
+                call_pc=pc,
+                callee_start=next_pc,
+                is_tail=True), max_stack)
             return
 
+    # Per-commit cycle floor with conservation: coarse-time dumps (ISS
+    # advancing time per block) put several PC changes on one timestamp,
+    # yielding zero tick deltas. Each committed instruction costs at
+    # least 1 cycle; the deficit is carried and reclaimed from the next
+    # positive delta, so total Cy still matches the tick span (and the
+    # Cy >= Ir invariant holds).
+    carry = 0
     while True:
         try:
             tick, pc = next(it)
@@ -279,7 +314,12 @@ def run(pc_stream: Iterable[Tuple[int, int]], binary: BinaryInfo,
             # stall: same instruction held across ticks -> defer commit
             # (cycle delta keeps growing via tick difference)
             continue
-        commit(prev_pc, tick - prev_tick, pc)
+        raw = (tick - prev_tick) + carry
+        if raw < 1:
+            cycles, carry = 1, raw - 1
+        else:
+            cycles, carry = raw, 0
+        commit(prev_pc, cycles, pc)
         prev_tick, prev_pc = tick, pc
 
     # drain remaining frames (program ended inside calls)
