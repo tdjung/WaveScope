@@ -41,7 +41,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Iterable, Iterator, List, Optional, Tuple
 
 from .classify import InsnClass
-from .disasm import BinaryInfo, Insn
+from .disasm import BinaryInfo, Insn, direct_target
 
 # Event names (callgrind "events:" order)
 EVENTS = ["Ir", "Cy", "Bc", "Bcm", "Bi", "Bim",
@@ -60,8 +60,8 @@ class CallSite:
 
 @dataclass
 class IsrCtx:
-    depth: int          # call-stack depth at exception entry
-    resume: int         # architectural resume PC (mepc equivalent)
+    depth: int                    # call-stack depth at exception entry
+    resume: Optional[int]         # architectural resume PC (mepc), if known
 
 
 XRET_MNEMONICS = {"mret", "sret", "uret", "eret"}
@@ -73,6 +73,7 @@ class FrameCtx:
     ret_addr: Optional[int]
     call_pc: Optional[int]          # pc of the call instruction
     callee_start: Optional[int]     # for parent's calls= bookkeeping
+    is_tail: bool = False
     acc: List[int] = field(default_factory=lambda: [0] * N_EVENTS)
 
 
@@ -125,21 +126,47 @@ def run(pc_stream: Iterable[Tuple[int, int]], binary: BinaryInfo,
         cls: InsnClass = classifier.classify(insn)
 
         fallthrough = pc + insn.size
+
+        # Resolved target of a *direct* transfer lets us judge taken /
+        # not-taken exactly (next_pc == target), instead of merely
+        # next_pc != fallthrough.
+        target = None
+        if (cls.is_cond_branch or cls.is_jump) and not cls.is_indirect:
+            target = direct_target(insn)
+
         taken = next_pc is not None and next_pc != fallthrough
+        if target is not None and next_pc is not None:
+            taken = next_pc == target
 
         # --- exception / interrupt entry ---------------------------------
-        # A non-control-transfer instruction whose successor is not the
-        # fallthrough means the core vectored to a trap handler between
-        # the two commits (incl. wakeup from wfi). Remember the resume PC
-        # (mepc equivalent) and clamp the boundary cycle delta: the gap
-        # may span a wfi sleep, which the simulator convention counts
-        # as a single cycle.
-        can_transfer = cls.is_jump or cls.is_cond_branch or cls.is_return
-        if taken and not can_transfer:
-            isr_ctxs.append(IsrCtx(depth=len(stack), resume=fallthrough))
+        # Trap entry between two commits shows up as a successor that no
+        # architectural path of this instruction can reach:
+        #   plain insn      : next != fallthrough
+        #   direct jump     : next != target
+        #   direct cond br  : next not in {target, fallthrough}
+        # (indirect transfers can reach anywhere -> undetectable here).
+        # Remember the resume PC (mepc equivalent) where known and clamp
+        # the boundary cycle delta: the gap may span a wfi sleep, which
+        # the simulator convention counts as a single cycle.
+        exception = False
+        resume: Optional[int] = None
+        if next_pc is not None:
+            if not (cls.is_jump or cls.is_cond_branch or cls.is_return):
+                if next_pc != fallthrough:
+                    exception, resume = True, fallthrough
+            elif target is not None:
+                if cls.is_cond_branch:
+                    if next_pc not in (target, fallthrough):
+                        exception = True          # resume ambiguous
+                elif cls.is_jump and not cls.writes_link:
+                    if next_pc != target:
+                        exception, resume = True, target
+        if exception:
+            isr_ctxs.append(IsrCtx(depth=len(stack), resume=resume))
             prof.exceptions += 1
             if clamp_exception_cycles:
                 cycles = min(cycles, 1)
+            taken = False
 
         prof._update(pc, E_IR, 1, stack)
         if cycles > 0:
@@ -148,7 +175,8 @@ def run(pc_stream: Iterable[Tuple[int, int]], binary: BinaryInfo,
         # --- exception / interrupt exit ----------------------------------
         if next_pc is not None and isr_ctxs and \
                 (insn.mnemonic in XRET_MNEMONICS or
-                 (cls.is_return and next_pc == isr_ctxs[-1].resume)):
+                 (cls.is_return and isr_ctxs[-1].resume is not None
+                  and next_pc == isr_ctxs[-1].resume)):
             ctx = isr_ctxs.pop()
             _unwind_to(prof, stack, min(ctx.depth, len(stack)))
             if cls.is_jump:
@@ -183,10 +211,17 @@ def run(pc_stream: Iterable[Tuple[int, int]], binary: BinaryInfo,
         diff_func = cur_func is None or not (cur_func.start <= next_pc < cur_func.end)
 
         # --- returns: pop frames whose saved link matches next_pc ------
+        # Tail frames inherit their parent's return address, so a match
+        # must unwind through the whole consecutive tail chain plus the
+        # normal frame that anchors it (callgrind semantics: the callers'
+        # inclusive costs cover tail-called continuations).
         if cls.is_return or (cls.is_jump and cls.is_indirect and not cls.writes_link):
             for i in range(len(stack) - 1, -1, -1):
                 if stack[i].ret_addr == next_pc:
-                    _unwind_to(prof, stack, i)
+                    j = i
+                    while j > 0 and stack[j].is_tail:
+                        j -= 1
+                    _unwind_to(prof, stack, j)
                     return
             if cls.is_return:
                 return  # unmatched ret (stack started mid-function)
@@ -206,14 +241,13 @@ def run(pc_stream: Iterable[Tuple[int, int]], binary: BinaryInfo,
         # --- tail calls --------------------------------------------------
         if taken_transfer and not cls.writes_link and callee_entry and diff_func:
             prof._update(pc, E_TAIL, 1, stack)
-            if stack:
-                # reuse caller's frame: same return address, new callee
-                top = stack[-1]
-                _flush_call(prof, stack, len(stack) - 1)
-                top.func_start = next_pc
-                top.callee_start = next_pc
-                top.call_pc = pc
-                top.acc = [0] * N_EVENTS
+            if stack and len(stack) < max_stack:
+                stack.append(FrameCtx(
+                    func_start=next_pc,
+                    ret_addr=stack[-1].ret_addr,   # returns to original caller
+                    call_pc=pc,
+                    callee_start=next_pc,
+                    is_tail=True))
             return
 
     while True:

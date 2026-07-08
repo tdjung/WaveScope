@@ -140,7 +140,8 @@ def cmd_signals(args) -> int:
 def cmd_profile(args) -> int:
     print(f"[wavescope] loading binary: {args.elf}", file=sys.stderr)
     binary = load_binary(args.elf, args.toolchain_prefix,
-                         with_lines=not args.no_lines)
+                         with_lines=not args.no_lines,
+                         demangle=not args.no_demangle)
     print(f"[wavescope]   {len(binary.insns)} instructions, "
           f"{len(binary.funcs)} functions", file=sys.stderr)
 
@@ -232,6 +233,9 @@ def main(argv=None) -> int:
     pp.add_argument("--toolchain-prefix", default="",
                     help="binutils prefix, e.g. riscv64-unknown-elf-, "
                          "arm-none-eabi-, aarch64-linux-gnu-")
+    pp.add_argument("--no-demangle", action="store_true",
+                    help="keep mangled C++/Rust symbol names "
+                         "(default: demangle via objdump -C)")
     pp.add_argument("--no-isr-clamp", action="store_true",
                     help="charge full raw cycles at exception/interrupt "
                          "boundaries (default clamps to 1, matching the "

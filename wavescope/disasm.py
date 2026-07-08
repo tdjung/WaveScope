@@ -73,17 +73,14 @@ def _tool(prefix: str, name: str) -> str:
 
 
 def load_binary(elf_path: str, toolchain_prefix: str = "",
-                with_lines: bool = True) -> BinaryInfo:
+                with_lines: bool = True, demangle: bool = True) -> BinaryInfo:
     info = BinaryInfo()
     objdump = _tool(toolchain_prefix, "objdump")
+    dm = ["-C"] if demangle else []
 
     # --- disassembly -------------------------------------------------
-    out = subprocess.run([objdump, "-d", "--no-show-raw-insn=0", elf_path],
-                         capture_output=True, text=True)
-    if out.returncode != 0:
-        # some objdump versions don't accept the raw-insn flag form
-        out = subprocess.run([objdump, "-d", elf_path],
-                             capture_output=True, text=True, check=True)
+    out = subprocess.run([objdump, "-d", *dm, elf_path],
+                         capture_output=True, text=True, check=True)
     addrs: List[int] = []
     labels: Dict[int, str] = {}          # objdump's own display labels
     for line in out.stdout.splitlines():
@@ -110,7 +107,7 @@ def load_binary(elf_path: str, toolchain_prefix: str = "",
         addrs.append(addr)
 
     # --- function symbols --------------------------------------------
-    sym = subprocess.run([objdump, "-t", elf_path],
+    sym = subprocess.run([objdump, "-t", *dm, elf_path],
                          capture_output=True, text=True, check=True)
     raw_funcs: List[Tuple[int, int, str]] = []
     for line in sym.stdout.splitlines():
@@ -178,6 +175,29 @@ def _load_lines(info: BinaryInfo, elf_path: str, prefix: str) -> None:
             except ValueError:
                 n = 0
             info.lines[addr] = (fname if fname != "??" else "??", n)
+
+
+_TARGET_RE = re.compile(r"^([0-9a-fA-F]+)\b")
+
+
+def direct_target(insn: Insn) -> Optional[int]:
+    """Resolved target address of a DIRECT branch/jump, parsed from the
+    objdump operand text (e.g. 'a0,a1,1014 <foo+0x8>' -> 0x1014).
+
+    Only meaningful for direct transfers -- callers must not use this
+    for indirect jumps (register operands like 'a5' parse as hex!).
+    """
+    ops = insn.operands
+    if not ops:
+        return None
+    last = ops.split(",")[-1].strip()
+    m = _TARGET_RE.match(last)
+    if not m:
+        return None
+    try:
+        return int(m.group(1), 16)
+    except ValueError:
+        return None
 
 
 def text_ranges(elf_path: str, toolchain_prefix: str = "") -> List[Tuple[int, int]]:
