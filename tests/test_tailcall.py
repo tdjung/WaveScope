@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from wavescope.classify import get_classifier
 from wavescope.disasm import BinaryInfo, Func, Insn, direct_target
-from wavescope.profiler import (E_BC, E_BCM, E_CY, E_IR, E_TAIL, run)
+from wavescope.profiler import (E_BC, E_BCM, E_CY, E_IR, run)
 
 
 def B():
@@ -53,12 +53,12 @@ class TestTailInclusive(unittest.TestCase):
     def setUp(self):
         self.prof = run(iter(TRACE), B(), get_classifier("riscv"))
 
-    def test_tail_event(self):
-        self.assertEqual(self.prof.self_cost[0x2004][E_TAIL], 1)
+    def test_tail_arc_exists(self):
+        self.assertIn((0x2004, 0x3000), self.prof.calls)
 
     def test_caller_inclusive_covers_tail_continuation(self):
         """A->B inclusive must include C's cost (callgrind semantics)."""
-        key = (0x1000, 0x1000, 0x2000)          # a_fn @0x1000 -> b_fn
+        key = (0x1000, 0x2000)                  # a_fn @0x1000 -> b_fn
         self.assertIn(key, self.prof.calls)
         inc = self.prof.calls[key].inclusive
         # B: 2 insns + C: 3 insns = 5
@@ -66,14 +66,14 @@ class TestTailInclusive(unittest.TestCase):
         self.assertEqual(inc[E_CY], 5)
 
     def test_tail_arc_recorded(self):
-        key = (0x2000, 0x2004, 0x3000)          # b_fn @tail -> c_fn
+        key = (0x2004, 0x3000)                  # b_fn @tail -> c_fn
         self.assertIn(key, self.prof.calls)
         self.assertEqual(self.prof.calls[key].count, 1)
         self.assertEqual(self.prof.calls[key].inclusive[E_IR], 3)  # C only
 
     def test_stack_fully_unwound(self):
         # after C's ret, A continues; nothing pending -> A never re-flushed
-        self.assertEqual(self.prof.calls[(0x1000, 0x1000, 0x2000)].count, 1)
+        self.assertEqual(self.prof.calls[(0x1000, 0x2000)].count, 1)
 
 
 class TestTargetTaken(unittest.TestCase):

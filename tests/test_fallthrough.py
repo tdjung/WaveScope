@@ -50,13 +50,13 @@ class TestFallThrough(unittest.TestCase):
         self.prof = run(iter(TRACE), B(), get_classifier("riscv"))
 
     def test_chain_arcs_exist(self):
-        self.assertIn((0x2000, 0x2004, 0x3000), self.prof.calls)  # tail
-        self.assertIn((0x3000, 0x3000, 0x3004), self.prof.calls)  # fall
-        self.assertIn((0x3004, 0x3004, 0x3008), self.prof.calls)  # fall
+        self.assertIn((0x2004, 0x3000), self.prof.calls)  # tail
+        self.assertIn((0x3000, 0x3004), self.prof.calls)  # fall
+        self.assertIn((0x3004, 0x3008), self.prof.calls)  # fall
 
     def test_leaf_self_equals_incoming_inclusive(self):
         """restore_0 is a leaf: its incoming arc inclusive == its self."""
-        arc = self.prof.calls[(0x3004, 0x3004, 0x3008)]
+        arc = self.prof.calls[(0x3004, 0x3008)]
         self_ir = (self.prof.self_cost[0x3008][E_IR]
                    + self.prof.self_cost[0x300c][E_IR])
         self_cy = (self.prof.self_cost[0x3008][E_CY]
@@ -66,9 +66,9 @@ class TestFallThrough(unittest.TestCase):
 
     def test_chain_inclusive_nesting(self):
         """restore_8 arc covers _4 and _0; ret unwinds everything to A."""
-        top = self.prof.calls[(0x2000, 0x2004, 0x3000)]
+        top = self.prof.calls[(0x2004, 0x3000)]
         self.assertEqual(top.inclusive[E_IR], 4)   # 3 lw + ret
-        a_call = self.prof.calls[(0x1000, 0x1000, 0x2000)]
+        a_call = self.prof.calls[(0x1000, 0x2000)]
         self.assertEqual(a_call.inclusive[E_IR], 6)  # b_fn 2 + restore 4
         self.assertEqual(a_call.count, 1)
 

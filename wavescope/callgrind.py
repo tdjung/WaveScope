@@ -36,12 +36,15 @@ def write(prof: Profile, out: TextIO, binary_path: str, cmd: str = "",
         else:
             orphans.append(pc)
 
-    # calls grouped by caller function
+    # calls grouped by the function physically containing the call insn
     calls_by_func: Dict[int, List[Tuple[int, int]]] = defaultdict(list)
-    for (caller, call_pc, callee) in prof.calls:
-        calls_by_func[caller].append((call_pc, callee))
+    for (call_pc, callee) in prof.calls:
+        f = b.func_at(call_pc)
+        calls_by_func[f.start if f else -1].append((call_pc, callee))
 
     def fname(start: int) -> str:
+        if start < 0:
+            return "<unknown>"
         f = b.func_at(start)
         return f.name if f else f"0x{start:x}"
 
@@ -73,14 +76,14 @@ def write(prof: Profile, out: TextIO, binary_path: str, cmd: str = "",
             costs = prof.self_cost[pc]
             out.write(f"0x{pc:x} {line} {' '.join(str(v) for v in costs)}\n")
             if pc in call_pcs:
-                _write_call(prof, out, b, fstart, pc, call_pcs.pop(pc))
+                _write_call(prof, out, b, pc, call_pcs.pop(pc))
 
         # call sites with no recorded self-cost line (shouldn't normally happen)
         for pc, callee in sorted(call_pcs.items()):
             _, line = b.line_at(pc)
             zeros = " ".join("0" for _ in range(N_EVENTS))
             out.write(f"0x{pc:x} {line} {zeros}\n")
-            _write_call(prof, out, b, fstart, pc, callee)
+            _write_call(prof, out, b, pc, callee)
         out.write("\n")
 
     if orphans:
@@ -92,8 +95,8 @@ def write(prof: Profile, out: TextIO, binary_path: str, cmd: str = "",
 
 
 def _write_call(prof: Profile, out: TextIO, b: BinaryInfo,
-                caller: int, call_pc: int, callee: int) -> None:
-    cs = prof.calls.get((caller, call_pc, callee))
+                call_pc: int, callee: int) -> None:
+    cs = prof.calls.get((call_pc, callee))
     if cs is None or cs.count == 0:
         return
     cf = b.func_at(callee)

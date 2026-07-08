@@ -34,21 +34,24 @@ class TestCycleCarry(unittest.TestCase):
         self.assertEqual(prof.total[E_IR], 7)
         for pc in (0x1000, 0x1004, 0x1008):
             self.assertEqual(prof.self_cost[pc][E_CY], 1)
-        # 4th insn keeps its REAL delta of 4 (no debt repayment)
-        self.assertEqual(prof.self_cost[0x100c][E_CY], 4)
+        # arrival attribution: 0x100c arrived at delta 0 -> floored to 1;
+        # 0x1010 arrived after the 4-tick gap -> pays 4
+        self.assertEqual(prof.self_cost[0x100c][E_CY], 1)
+        self.assertEqual(prof.self_cost[0x1010][E_CY], 4)
         self.assertGreaterEqual(prof.total[E_CY], prof.total[E_IR])
 
     def test_stalls_survive_earlier_bursts(self):
         """Field case: sw with stalls (delta 2-3) AFTER a same-timestamp
         burst region must keep its stall cycles -- previously a carried
         deficit clamped them all to 1 (Cy == Ir symptom)."""
-        # burst of 3 zero-deltas, then per-insn deltas 3,1,2
+        # burst of 3 zero-deltas, then arrival gaps 1,3,1,2
         trace = [(0, 0x1000), (0, 0x1004), (0, 0x1008),
                  (1, 0x100c), (4, 0x1010), (5, 0x1014), (7, 0x1018)]
         prof = run(iter(trace), linear_binary(), get_classifier("riscv"))
-        self.assertEqual(prof.self_cost[0x100c][E_CY], 3)   # stall kept
-        self.assertEqual(prof.self_cost[0x1010][E_CY], 1)
-        self.assertEqual(prof.self_cost[0x1014][E_CY], 2)   # stall kept
+        self.assertEqual(prof.self_cost[0x100c][E_CY], 1)
+        self.assertEqual(prof.self_cost[0x1010][E_CY], 3)   # stall kept
+        self.assertEqual(prof.self_cost[0x1014][E_CY], 1)
+        self.assertEqual(prof.self_cost[0x1018][E_CY], 2)   # stall kept
 
     def test_cy_never_below_ir(self):
         trace = [(0, 0x1000), (0, 0x1004), (0, 0x1008), (0, 0x100c),
@@ -87,7 +90,7 @@ class TestReturnHealing(unittest.TestCase):
         trace = [(0, 0x2000), (1, 0x3000), (2, 0x3004),
                  (3, 0x2000), (4, 0x3000)]
         prof = run(iter(trace), b, get_classifier("riscv"))
-        key = (0x2000, 0x2000, 0x3000)
+        key = (0x2000, 0x3000)
         self.assertIn(key, prof.calls)
         # both invocations flushed with bounded inclusive (not leaked to
         # end-of-program): each covers leaf's 2 insns at most + boundary
@@ -107,7 +110,7 @@ class TestStackSaturation(unittest.TestCase):
             trace.append((t, 0x3000)); t += 1
         prof = run(iter(trace), b, get_classifier("riscv"), max_stack=4)
         # must not crash; calls recorded and flushed
-        self.assertIn((0x2000, 0x2000, 0x3000), prof.calls)
+        self.assertIn((0x2000, 0x3000), prof.calls)
 
 
 if __name__ == "__main__":

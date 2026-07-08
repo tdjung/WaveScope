@@ -60,7 +60,8 @@ class TestClockless(unittest.TestCase):
         _, gen = changes_to_ticks(iter(self._samples()))
         prof = run(gen, make_binary(), get_classifier("riscv"))
         self.assertEqual(prof.self_cost[0x2000][E_IR], 1)
-        self.assertEqual(prof.self_cost[0x2000][E_CY], 2)   # stall kept
+        # arrival attribution: 0x2004 pays the 2-tick gap after the stall
+        self.assertEqual(prof.self_cost[0x2004][E_CY], 2)
         self.assertEqual(prof.total[E_IR], 8)
 
     def test_valid_gating(self):

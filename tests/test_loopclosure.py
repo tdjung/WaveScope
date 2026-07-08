@@ -60,7 +60,7 @@ class TestLoopClosure(unittest.TestCase):
                         f"frame stacking")
         # the entered-label frame survives the whole loop: outer->loop arc
         # inclusive covers all iterations + ret
-        key = (0x2000, 0x2000, 0x2004)
+        key = (0x2000, 0x2004)
         self.assertIn(key, prof.calls)
         self.assertEqual(prof.calls[key].inclusive[E_IR], 3 * n + 1)
 

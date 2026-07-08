@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from wavescope.classify import get_classifier
 from wavescope.disasm import BinaryInfo, Func, Insn
-from wavescope.profiler import (E_BC, E_BCM, E_CALL, E_CY, E_DR, E_DW, E_IR,
+from wavescope.profiler import (E_BC, E_BCM, E_CY, E_DR, E_DW, E_IR,
                                 run)
 from wavescope.callgrind import write as write_callgrind
 from wavescope.vcd_reader import iter_pc_samples
@@ -118,7 +118,9 @@ class TestProfiler(unittest.TestCase):
         self.assertNotIn(0x1010, sc)              # skipped by taken branch
 
     def test_stall_cycles(self):
-        self.assertEqual(self.prof.self_cost[0x2000][E_CY], 2)
+        # arrival attribution: the instruction AFTER the hold pays the gap
+        self.assertEqual(self.prof.self_cost[0x2000][E_CY], 1)
+        self.assertEqual(self.prof.self_cost[0x2004][E_CY], 2)
 
     def test_branch(self):
         sc = self.prof.self_cost[0x100c]
@@ -126,13 +128,12 @@ class TestProfiler(unittest.TestCase):
         self.assertEqual(sc[E_BCM], 1)            # taken
 
     def test_call_tracked(self):
-        self.assertEqual(self.prof.self_cost[0x1004][E_CALL], 1)
-        key = (0x1000, 0x1004, 0x2000)
+        key = (0x1004, 0x2000)
         self.assertIn(key, self.prof.calls)
         cs = self.prof.calls[key]
         self.assertEqual(cs.count, 1)
         self.assertEqual(cs.inclusive[E_IR], 2)   # addi + ret inside func
-        self.assertEqual(cs.inclusive[E_CY], 3)   # 2 (stalled addi) + 1 (ret)
+        self.assertEqual(cs.inclusive[E_CY], 3)   # 1 + stalled ret pays 2
 
     def test_mem_events(self):
         self.assertEqual(self.prof.self_cost[0x1008][E_DR], 1)

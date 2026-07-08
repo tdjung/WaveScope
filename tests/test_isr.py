@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from wavescope.classify import get_classifier
 from wavescope.disasm import BinaryInfo, Func, Insn
-from wavescope.profiler import E_CALL, E_CY, E_IR, run
+from wavescope.profiler import E_CY, E_IR, run
 
 
 def B():
@@ -58,16 +58,15 @@ class TestIsr(unittest.TestCase):
         self.assertEqual(self.prof.exceptions, 1)
 
     def test_wfi_sleep_clamped(self):
-        # gap of 94 ticks across the sleep is charged as 1 cycle
-        self.assertEqual(self.prof.self_cost[0x1004][E_CY], 1)
+        # the sleep gap arrives with the FIRST handler insn: clamped to 1
+        self.assertEqual(self.prof.self_cost[0x3000][E_CY], 1)
 
     def test_isr_instructions_counted(self):
         for pc in (0x3000, 0x3004, 0x3008, 0x4000, 0x4004):
             self.assertEqual(self.prof.self_cost[pc][E_IR], 1, hex(pc))
 
     def test_call_inside_isr(self):
-        self.assertEqual(self.prof.self_cost[0x3004][E_CALL], 1)
-        key = (0x3000, 0x3004, 0x4000)
+        key = (0x3004, 0x4000)
         self.assertIn(key, self.prof.calls)
         self.assertEqual(self.prof.calls[key].inclusive[E_IR], 2)
 
@@ -77,7 +76,7 @@ class TestIsr(unittest.TestCase):
     def test_no_clamp_option(self):
         prof = run(iter(TRACE), B(), get_classifier("riscv"),
                    clamp_exception_cycles=False)
-        self.assertEqual(prof.self_cost[0x1004][E_CY], 94)
+        self.assertEqual(prof.self_cost[0x3000][E_CY], 94)
 
 
 class TestAliasedSymbols(unittest.TestCase):
