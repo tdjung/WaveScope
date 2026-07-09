@@ -19,8 +19,6 @@ counters so `wavescope signals` / `scan --explain` can show exactly why
 a signal was or wasn't picked.
 """
 
-from __future__ import annotations
-
 import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple

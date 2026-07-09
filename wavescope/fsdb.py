@@ -17,8 +17,6 @@ The invocations below follow the common form; if your version differs,
 override with --fsdbreport-args / --fsdb2vcd-args (":" separated).
 """
 
-from __future__ import annotations
-
 import os
 import re
 import shutil
@@ -74,7 +72,7 @@ def _dump_signal(tool: str, fsdb: str, signal: str,
         out_path = tf.name
     try:
         cmd = [tool, fsdb, "-s", signal, "-of", "h", "-o", out_path] + extra_args
-        r = subprocess.run(cmd, capture_output=True, text=True)
+        r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
         if r.returncode != 0:
             raise FsdbError(
                 f"fsdbreport failed for '{signal}':\n{r.stderr.strip()}\n"
@@ -168,7 +166,7 @@ def convert_to_vcd(fsdb: str, tool: str, scope: Optional[str] = None,
     if scope:
         cmd += ["-s", scope if scope.startswith("/") else to_fsdb_path(scope)]
     cmd += (extra_args or [])
-    r = subprocess.run(cmd, capture_output=True, text=True)
+    r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
     if r.returncode != 0 or not os.path.exists(out):
         raise FsdbError(
             f"fsdb2vcd failed:\n{r.stderr.strip()}\ncmd: {' '.join(cmd)}\n"

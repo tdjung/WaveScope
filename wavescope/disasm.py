@@ -5,8 +5,6 @@ for any target ISA for which a cross toolchain exists on the Linux host.
 Default prefix targets RISC-V; override with --toolchain-prefix.
 """
 
-from __future__ import annotations
-
 import bisect
 import re
 import shutil
@@ -106,7 +104,7 @@ def load_binary(elf_path: str, toolchain_prefix: str = "",
 
     # --- disassembly -------------------------------------------------
     out = subprocess.run([objdump, "-d", *dm, elf_path],
-                         capture_output=True, text=True, check=True)
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, check=True)
     addrs: List[int] = []
     labels: Dict[int, str] = {}          # objdump's own display labels
     for line in out.stdout.splitlines():
@@ -134,7 +132,7 @@ def load_binary(elf_path: str, toolchain_prefix: str = "",
 
     # --- function symbols --------------------------------------------
     sym = subprocess.run([objdump, "-t", *dm, elf_path],
-                         capture_output=True, text=True, check=True)
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, check=True)
     raw_funcs: List[Tuple[int, int, str]] = []
     for line in sym.stdout.splitlines():
         m = _SYM_RE.match(line)
@@ -192,7 +190,7 @@ def _load_lines(info: BinaryInfo, elf_path: str, prefix: str) -> None:
         chunk = addr_list[i:i + CHUNK]
         inp = "\n".join(hex(a) for a in chunk)
         out = subprocess.run([addr2line, "-e", elf_path],
-                             input=inp, capture_output=True, text=True)
+                             input=inp, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
         if out.returncode != 0:
             return
         for addr, line in zip(chunk, out.stdout.splitlines()):
@@ -234,7 +232,7 @@ def text_ranges(elf_path: str, toolchain_prefix: str = "") -> List[Tuple[int, in
     """Executable section address ranges [(start, end), ...] via objdump -h."""
     objdump = _tool(toolchain_prefix, "objdump")
     out = subprocess.run([objdump, "-h", elf_path],
-                         capture_output=True, text=True, check=True)
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, check=True)
     ranges: List[Tuple[int, int]] = []
     lines = out.stdout.splitlines()
     for i, line in enumerate(lines):

@@ -10,7 +10,8 @@ symbol과 결합해 **callgrind format 프로파일**을 생성하는 Linux CLI 
 사용자는 기존에 자체 simulator에 내장된 update_profile() 기반 callgrind
 생성기를 보유 — WaveScope의 출력을 그 결과와 비교하며 수렴시키는 중.
 
-- 레포: github.com/tdjung/WaveScope (Python ≥3.8, 의존성 없음)
+- 레포: github.com/tdjung/WaveScope (Python ≥3.6 지원; 3.6은 dataclasses
+  backport 필요, 구형 pip 9용 setup.py 병행 유지 — v0.6.2)
 - 참조 구현: 사용자의 simulator profiler (C++, 대화에서 수도코드로 공유받음)
 - UI: 별도 레포 MoveMyCode/profiler_web_prj (Electron+Next.js callgrind
   뷰어)와 연동 예정. WaveScope는 CLI 생성기로 유지하기로 결정.

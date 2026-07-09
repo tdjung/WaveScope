@@ -4,8 +4,6 @@
     prepare_for_scan(...) -> a VCD path usable by scan (converting if needed)
 """
 
-from __future__ import annotations
-
 import sys
 from dataclasses import dataclass, field
 from typing import Iterator, List, Optional, Tuple

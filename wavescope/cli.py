@@ -13,8 +13,6 @@ Typical two-step workflow:
         -o callgrind.out.wavescope
 """
 
-from __future__ import annotations
-
 import argparse
 import json
 import sys

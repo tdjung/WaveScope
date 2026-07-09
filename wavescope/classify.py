@@ -17,8 +17,6 @@ Overlay for an instruction objdump can NOT disassemble (shows ".word"):
           "classes": ["load"], "size": 4 } ] }
 """
 
-from __future__ import annotations
-
 import json
 import os
 import re

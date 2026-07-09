@@ -4,8 +4,6 @@ Produces files loadable by kcachegrind / qcachegrind / callgrind_annotate.
 Format reference: https://valgrind.org/docs/manual/cl-format.html
 """
 
-from __future__ import annotations
-
 from collections import defaultdict
 from typing import Dict, List, TextIO, Tuple
 

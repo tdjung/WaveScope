@@ -85,7 +85,8 @@ invocation fails, override with `--fsdbreport-args` / `--fsdb2vcd-args`
 
 ## Requirements
 
-- Linux, Python ≥ 3.8 (no Python dependencies)
+- Linux, Python ≥ 3.6 (on 3.6 only: `pip3 install dataclasses` backport;
+  3.7+ has no dependencies)
 - binutils for your target (`objdump`, optional `addr2line`)
 - for FSDB input: a Verdi installation
 

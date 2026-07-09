@@ -7,8 +7,6 @@ Output: an iterator of (tick_index, pc_value) committed samples, where
 tick_index counts rising edges of the chosen clock signal.
 """
 
-from __future__ import annotations
-
 import bz2
 import gzip
 import io
@@ -85,14 +83,14 @@ def _try_binary_converters(path: str) -> Optional[str]:
             continue
         try:
             if tool == "fst2vcd":
-                r = subprocess.run([exe] + argv, capture_output=True,
-                                   text=True, timeout=3600)
+                r = subprocess.run([exe] + argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                   universal_newlines=True, timeout=3600)
                 ok = r.returncode == 0 and os.path.exists(out) \
                     and os.path.getsize(out) > 0
             else:   # lxt2vcd/vzt2vcd write to stdout
                 with open(out, "w") as fo:
                     r = subprocess.run([exe] + argv, stdout=fo,
-                                       stderr=subprocess.PIPE, text=True,
+                                       stderr=subprocess.PIPE, universal_newlines=True,
                                        timeout=3600)
                 ok = r.returncode == 0 and os.path.getsize(out) > 0
             if ok:
