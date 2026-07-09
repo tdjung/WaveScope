@@ -77,3 +77,17 @@ class TestClockless(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestLargeTimestamps(unittest.TestCase):
+    def test_no_float_precision_drift(self):
+        """fs-scale timestamps beyond float53 must still land on exact
+        ticks (stall deltas of 2-3 preserved late in the run)."""
+        from wavescope.vcd_reader import changes_to_ticks
+        period = 1_000_000                     # 1ns in fs
+        base = 9_007_199_254_740_992           # 2^53: float loses ints here
+        times = [base, base + period, base + 3 * period, base + 4 * period]
+        changes = [(t, 0x1000 + i * 4) for i, t in enumerate(times)]
+        p, gen = changes_to_ticks(iter(changes), period=period)
+        ticks = [t for t, _ in gen]
+        self.assertEqual(ticks, [0, 1, 3, 4])   # 2-tick stall intact

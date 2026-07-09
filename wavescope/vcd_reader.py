@@ -412,10 +412,12 @@ def changes_to_ticks(changes: Iterator[Tuple[int, int]],
     p = period
 
     def gen() -> Iterator[Tuple[int, int]]:
+        # integer round-half-up: float division loses precision for
+        # large timestamps (fs-scale dumps exceed float53 quickly)
         t0: Optional[int] = None
         for t, v in itertools.chain(buf, changes):
             if t0 is None:
                 t0 = t
-            yield round((t - t0) / p), v
+            yield (t - t0 + p // 2) // p, v
 
     return p, gen()
