@@ -4,14 +4,11 @@ from setuptools import setup, find_packages
 
 setup(
     name="wavescope",
-    version="0.6.2",
+    version="0.6.3",
     description=("Extract PC/clock from RTL waveforms and generate "
                  "callgrind profiles using ELF debug symbols"),
     python_requires=">=3.6",
     packages=find_packages(include=["wavescope*"]),
     package_data={"wavescope": ["isa/*.json"]},
-    install_requires=[
-        'dataclasses; python_version < "3.7"',
-    ],
     entry_points={"console_scripts": ["wavescope=wavescope.cli:main"]},
 )

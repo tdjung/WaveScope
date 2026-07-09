@@ -85,8 +85,8 @@ invocation fails, override with `--fsdbreport-args` / `--fsdb2vcd-args`
 
 ## Requirements
 
-- Linux, Python ≥ 3.6 (on 3.6 only: `pip3 install dataclasses` backport;
-  3.7+ has no dependencies)
+- Linux, Python ≥ 3.6, **zero dependencies** (stdlib only) -- runs
+  directly from a clone without pip: `python3 -m wavescope.cli ...`
 - binutils for your target (`objdump`, optional `addr2line`)
 - for FSDB input: a Verdi installation
 

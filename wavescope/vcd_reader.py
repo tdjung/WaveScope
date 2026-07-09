@@ -15,15 +15,16 @@ import os
 import shutil
 import subprocess
 import tempfile
-from dataclasses import dataclass
 from typing import Dict, Iterator, List, Optional, Tuple
 
 
-@dataclass
-class VcdSignal:
-    ident: str          # short id code used in value-change section
-    name: str           # full hierarchical name (dot separated)
-    width: int
+class VcdSignal(object):
+    __slots__ = ("ident", "name", "width")
+
+    def __init__(self, ident, name, width):
+        self.ident = ident          # short id code used in value-change section
+        self.name = name            # full hierarchical name (dot separated)
+        self.width = width
 
 
 class VcdError(Exception):

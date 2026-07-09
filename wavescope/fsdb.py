@@ -22,7 +22,6 @@ import re
 import shutil
 import subprocess
 import tempfile
-from dataclasses import dataclass
 from typing import Iterator, List, Optional, Tuple
 
 
@@ -30,10 +29,12 @@ class FsdbError(Exception):
     pass
 
 
-@dataclass
-class VerdiTools:
-    fsdbreport: Optional[str]
-    fsdb2vcd: Optional[str]
+class VerdiTools(object):
+    __slots__ = ("fsdbreport", "fsdb2vcd")
+
+    def __init__(self, fsdbreport, fsdb2vcd):
+        self.fsdbreport = fsdbreport
+        self.fsdb2vcd = fsdb2vcd
 
 
 def find_tools(verdi_home: Optional[str] = None) -> VerdiTools:

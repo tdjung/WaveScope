@@ -20,7 +20,6 @@ a signal was or wasn't picked.
 """
 
 import re
-from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from .vcd_reader import VcdSignal, open_vcd_text, read_header
@@ -36,53 +35,67 @@ MIN_CHANGES = 8
 SCORE_FLOOR = 0.05
 
 
-@dataclass
-class SigStats:
-    sig: VcdSignal
-    changes: int = 0
-    bad_lines: int = 0            # x/z or unparseable values
-    prev_int: Optional[int] = None
-    stride_hits: int = 0
-    stride_total: int = 0
-    text_hits: int = 0
-    text_total: int = 0
-    distinct: set = field(default_factory=set)
-    first_values: List[int] = field(default_factory=list)
-    last_value: Optional[int] = None
-    # clock-specific
-    last_time: Optional[int] = None
-    deltas: Dict[int, int] = field(default_factory=dict)
+class SigStats(object):
+    __slots__ = ("sig", "changes", "bad_lines", "prev_int", "stride_hits",
+                 "stride_total", "text_hits", "text_total", "distinct",
+                 "first_values", "last_value", "last_time", "deltas")
+
+    def __init__(self, sig):
+        self.sig = sig
+        self.changes = 0
+        self.bad_lines = 0           # x/z or unparseable values
+        self.prev_int = None
+        self.stride_hits = 0
+        self.stride_total = 0
+        self.text_hits = 0
+        self.text_total = 0
+        self.distinct = set()
+        self.first_values = []
+        self.last_value = None
+        # clock-specific
+        self.last_time = None
+        self.deltas = {}
 
 
-@dataclass
-class Candidate:
-    name: str
-    width: int
-    score: float
-    reasons: List[str]
+class Candidate(object):
+    __slots__ = ("name", "width", "score", "reasons")
+
+    def __init__(self, name, width, score, reasons):
+        self.name = name
+        self.width = width
+        self.score = score
+        self.reasons = reasons
 
     def to_dict(self) -> dict:
         return {"name": self.name, "width": self.width,
                 "score": round(self.score, 4), "reasons": self.reasons}
 
 
-@dataclass
-class ParseStats:
-    n_signals: int = 0
-    n_vector_tracked: int = 0
-    n_scalar_tracked: int = 0
-    value_lines_seen: int = 0
-    value_lines_matched: int = 0
-    budget_exhausted: bool = False
+class ParseStats(object):
+    __slots__ = ("n_signals", "n_vector_tracked", "n_scalar_tracked",
+                 "value_lines_seen", "value_lines_matched",
+                 "budget_exhausted")
+
+    def __init__(self):
+        self.n_signals = 0
+        self.n_vector_tracked = 0
+        self.n_scalar_tracked = 0
+        self.value_lines_seen = 0
+        self.value_lines_matched = 0
+        self.budget_exhausted = False
 
 
-@dataclass
-class ScanResult:
-    pc_candidates: List[Candidate]
-    clock_candidates: List[Candidate]
-    vec_stats: Dict[str, SigStats]     # signal full name -> stats
-    clk_stats: Dict[str, SigStats]
-    parse: ParseStats
+class ScanResult(object):
+    __slots__ = ("pc_candidates", "clock_candidates", "vec_stats",
+                 "clk_stats", "parse")
+
+    def __init__(self, pc_candidates, clock_candidates, vec_stats,
+                 clk_stats, parse):
+        self.pc_candidates = pc_candidates
+        self.clock_candidates = clock_candidates
+        self.vec_stats = vec_stats       # signal full name -> stats
+        self.clk_stats = clk_stats
+        self.parse = parse
 
     def __iter__(self):                 # allows: pcs, clks = scan(...)
         yield self.pc_candidates

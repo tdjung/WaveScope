@@ -5,7 +5,6 @@
 """
 
 import sys
-from dataclasses import dataclass, field
 from typing import Iterator, List, Optional, Tuple
 
 from . import fsdb as fsdb_mod
@@ -13,12 +12,16 @@ from .vcd_reader import (changes_to_ticks, get_timescale, iter_pc_changes,
                          iter_pc_samples, parse_period)
 
 
-@dataclass
-class WaveConfig:
-    verdi_home: Optional[str] = None
-    fsdb_scope: Optional[str] = None
-    fsdbreport_args: List[str] = field(default_factory=list)
-    fsdb2vcd_args: List[str] = field(default_factory=list)
+class WaveConfig(object):
+    __slots__ = ("verdi_home", "fsdb_scope", "fsdbreport_args",
+                 "fsdb2vcd_args")
+
+    def __init__(self, verdi_home=None, fsdb_scope=None,
+                 fsdbreport_args=None, fsdb2vcd_args=None):
+        self.verdi_home = verdi_home
+        self.fsdb_scope = fsdb_scope
+        self.fsdbreport_args = fsdbreport_args if fsdbreport_args is not None else []
+        self.fsdb2vcd_args = fsdb2vcd_args if fsdb2vcd_args is not None else []
 
 
 def _is_fsdb(path: str) -> bool:

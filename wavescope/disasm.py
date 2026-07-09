@@ -9,32 +9,35 @@ import bisect
 import re
 import shutil
 import subprocess
-from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 
-@dataclass
-class Insn:
-    addr: int
-    size: int
-    mnemonic: str
-    operands: str
-    encoding: Optional[int] = None   # raw instruction bits (listing order)
+class Insn(object):
+    __slots__ = ("addr", "size", "mnemonic", "operands", "encoding")
+
+    def __init__(self, addr, size, mnemonic, operands, encoding=None):
+        self.addr = addr
+        self.size = size
+        self.mnemonic = mnemonic
+        self.operands = operands
+        self.encoding = encoding     # raw instruction bits (listing order)
 
 
-@dataclass
-class Func:
-    name: str
-    start: int
-    end: int          # exclusive
+class Func(object):
+    __slots__ = ("name", "start", "end")
+
+    def __init__(self, name, start, end):
+        self.name = name
+        self.start = start
+        self.end = end               # exclusive
 
 
-@dataclass
-class BinaryInfo:
-    insns: Dict[int, Insn] = field(default_factory=dict)
-    funcs: List[Func] = field(default_factory=list)     # sorted by start
-    _starts: List[int] = field(default_factory=list)
-    lines: Dict[int, Tuple[str, int]] = field(default_factory=dict)  # addr -> (file, line)
+class BinaryInfo(object):
+    def __init__(self):
+        self.insns = {}              # type: Dict[int, Insn]
+        self.funcs = []              # type: List[Func]  (sorted by start)
+        self._starts = []            # type: List[int]
+        self.lines = {}              # type: Dict[int, Tuple[str, int]]  addr -> (file, line)
 
     def func_at(self, addr: int) -> Optional[Func]:
         i = bisect.bisect_right(self._starts, addr) - 1

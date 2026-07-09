@@ -15,7 +15,6 @@ are tracked structurally (frames / calls map), not as per-PC events.
 """
 
 from collections import defaultdict
-from dataclasses import dataclass, field
 from typing import Dict, Iterable, Iterator, List, Optional, Tuple
 
 from .classify import InsnClass
@@ -32,27 +31,35 @@ XRET_MNEMONICS = {"mret", "sret", "uret", "eret"}
 _LOOP_SCAN_DEPTH = 64
 
 
-@dataclass
-class CallSite:
+class CallSite(object):
     """Aggregated call info for callgrind `calls=` lines."""
-    count: int = 0
-    inclusive: List[int] = field(default_factory=lambda: [0] * N_EVENTS)
+    __slots__ = ("count", "inclusive")
+
+    def __init__(self):
+        self.count = 0
+        self.inclusive = [0] * N_EVENTS
 
 
-@dataclass
-class IsrCtx:
-    depth: int                    # call-stack depth at exception entry
-    resume: Optional[int]         # architectural resume PC (mepc), if known
+class IsrCtx(object):
+    __slots__ = ("depth", "resume")
+
+    def __init__(self, depth, resume):
+        self.depth = depth        # call-stack depth at exception entry
+        self.resume = resume      # architectural resume PC (mepc), if known
 
 
-@dataclass
-class FrameCtx:
-    func_start: int
-    ret_addr: Optional[int]
-    call_pc: Optional[int]          # pc of the call instruction
-    callee_start: Optional[int]     # callee entry for calls= bookkeeping
-    is_tail: bool = False
-    acc: List[int] = field(default_factory=lambda: [0] * N_EVENTS)
+class FrameCtx(object):
+    __slots__ = ("func_start", "ret_addr", "call_pc", "callee_start",
+                 "is_tail", "acc")
+
+    def __init__(self, func_start, ret_addr, call_pc, callee_start,
+                 is_tail=False):
+        self.func_start = func_start
+        self.ret_addr = ret_addr
+        self.call_pc = call_pc            # pc of the call instruction
+        self.callee_start = callee_start  # callee entry for calls= bookkeeping
+        self.is_tail = is_tail
+        self.acc = [0] * N_EVENTS
 
 
 class Profile:

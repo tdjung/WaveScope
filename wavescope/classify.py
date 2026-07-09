@@ -20,7 +20,6 @@ Overlay for an instruction objdump can NOT disassemble (shows ".word"):
 import json
 import os
 import re
-from dataclasses import dataclass
 from typing import Dict, List, Optional, Set
 
 from .disasm import Insn
@@ -36,24 +35,29 @@ ISA_ALIASES = {
 }
 
 
-@dataclass
-class InsnClass:
-    is_cond_branch: bool = False
-    is_jump: bool = False
-    is_indirect: bool = False
-    is_load: bool = False
-    is_store: bool = False
-    writes_link: bool = False
-    is_return: bool = False
+class InsnClass(object):
+    __slots__ = ("is_cond_branch", "is_jump", "is_indirect", "is_load",
+                 "is_store", "writes_link", "is_return")
+
+    def __init__(self, is_cond_branch=False, is_jump=False,
+                 is_indirect=False, is_load=False, is_store=False,
+                 writes_link=False, is_return=False):
+        self.is_cond_branch = is_cond_branch
+        self.is_jump = is_jump
+        self.is_indirect = is_indirect
+        self.is_load = is_load
+        self.is_store = is_store
+        self.writes_link = writes_link
+        self.is_return = is_return
 
 
-@dataclass
-class EncodingRule:
-    name: str
-    mask: int
-    match: int
-    classes: List[str]
-    size: int = 4
+class EncodingRule(object):
+    def __init__(self, name, mask, match, classes, size=4):
+        self.name = name
+        self.mask = mask
+        self.match = match
+        self.classes = classes
+        self.size = size
 
 
 _TOKEN_RE = re.compile(r"[a-z0-9_.]+")
