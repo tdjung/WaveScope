@@ -103,6 +103,11 @@ wavescope profile --wave all.vcd --elf fw.elf \
 
 ## 4. 사용자 simulator 알고리즘 요점 (공유받은 수도코드)
 
+> **전체 코드 정리본: `docs/simulator_reference.md`** — update_profile /
+> update_epc / update / wfi handlers / update_branch / check_branch_type /
+> handler_branch / remain_call_stack_process 전문과 오타 교정,
+> WaveScope 대응표 포함. 새 대화에서 재타이핑 불필요.
+
 - 매 instruction: update_epc(mepc, pc) → Ir → Cy_direct(cur−last) →
   branch/jump/load/store 이벤트 → update_branch로 (last_pc, branchType,
   taken) 기록 → 다음 instruction에서 check_branch_type + handler_branch.
