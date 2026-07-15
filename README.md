@@ -68,8 +68,9 @@ wavescope profile ... --isa riscv --isa-ext my_custom.json
 
 | Format | Support |
 |---|---|
-| VCD | native (dependency-free parser) |
+| VCD | native (dependency-free parser; gzip/bz2/xz transparent) |
 | FSDB | via Synopsys Verdi tools -- see below |
+| TRN / SHM (Cadence) | via `simvisdbutil` (ships with Xcelium/SimVision) |
 
 FSDB is a proprietary format with no open-source reader. WaveScope
 auto-detects Verdi utilities (`--verdi-home`, `$VERDI_HOME`, or `$PATH`):
@@ -82,6 +83,13 @@ auto-detects Verdi utilities (`--verdi-home`, `$VERDI_HOME`, or `$PATH`):
 Verdi tool flags vary slightly between releases; if the default
 invocation fails, override with `--fsdbreport-args` / `--fsdb2vcd-args`
 (":"-separated).
+
+For Cadence TRN/SHM, pass the `.trn` file or the `.shm` directory as
+`--wave`; WaveScope finds `simvisdbutil` via `--cadence-bin`,
+`$XCELIUM_HOME` / `$CDS_ROOT`, or `$PATH`, converts to VCD (restrict
+with `--fsdb-scope` -- the same flag drives `-scope ... -recursive`),
+and proceeds. Override flags with `--simvisdbutil-args` if your
+Xcelium release differs.
 
 ## Requirements
 

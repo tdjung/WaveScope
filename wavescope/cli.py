@@ -28,7 +28,7 @@ from .waveform import WaveConfig, open_pc_stream, prepare_for_scan
 
 def _add_wave_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--wave", "--vcd", dest="wave", required=True,
-                   help="input waveform (.vcd or .fsdb)")
+                   help="input waveform: .vcd, .fsdb, or .trn/.shm (Cadence)")
     p.add_argument("--verdi-home", default=None,
                    help="Verdi install dir for FSDB tools (default: $VERDI_HOME)")
     p.add_argument("--fsdb-scope", default=None,
@@ -38,6 +38,11 @@ def _add_wave_args(p: argparse.ArgumentParser) -> None:
                    help="extra fsdbreport args, ':' separated")
     p.add_argument("--fsdb2vcd-args", default="",
                    help="extra fsdb2vcd args, ':' separated")
+    p.add_argument("--cadence-bin", default=None,
+                   help="dir containing simvisdbutil for TRN/SHM input "
+                        "(default: $XCELIUM_HOME/$CDS_ROOT tools/bin, PATH)")
+    p.add_argument("--simvisdbutil-args", default="",
+                   help="extra simvisdbutil args, ':' separated")
 
 
 def _wave_cfg(args) -> WaveConfig:
@@ -45,7 +50,9 @@ def _wave_cfg(args) -> WaveConfig:
         verdi_home=args.verdi_home,
         fsdb_scope=args.fsdb_scope,
         fsdbreport_args=[a for a in args.fsdbreport_args.split(":") if a],
-        fsdb2vcd_args=[a for a in args.fsdb2vcd_args.split(":") if a])
+        fsdb2vcd_args=[a for a in args.fsdb2vcd_args.split(":") if a],
+        cadence_bin=args.cadence_bin,
+        simvisdbutil_args=[a for a in args.simvisdbutil_args.split(":") if a])
 
 
 def cmd_scan(args) -> int:

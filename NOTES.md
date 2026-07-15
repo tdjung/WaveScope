@@ -43,6 +43,7 @@ wavescope/
 │                       #   - clockless: iter_pc_changes + changes_to_ticks
 │                       #     (period = delta GCD, tick = 정수 round-half-up)
 ├── fsdb.py             # Verdi fsdbreport(신호별 추출 우선) / fsdb2vcd(--fsdb-scope)
+├── trn.py              # Cadence TRN/SHM → simvisdbutil로 VCD 변환 (v0.7.0, 실환경 미검증)
 ├── waveform.py         # 입력 디스패치 (vcd/fsdb, clocked/clockless)
 ├── scan.py             # PC/clock signal 후보 랭킹 (ELF text range 매칭 0.55
 │                       #   + stride + 이름 + 폭). --json, --explain, signals 서브커맨드
@@ -187,6 +188,8 @@ wavescope profile --wave all.vcd --elf fw.elf \
   tarmac trace 기반(ARM+Cadence 종속)으로 확인.
 - FSDB 도구 플래그는 Verdi 버전별 상이 → --fsdbreport-args/--fsdb2vcd-args
   override 제공. 실환경 미검증.
+- TRN/SHM(Cadence)은 simvisdbutil 변환 경로 (--cadence-bin/$XCELIUM_HOME/
+  $CDS_ROOT/PATH 탐색, --simvisdbutil-args override). 역시 실환경 미검증.
 - 사용자 waveform의 PC signal: blk_cpu.riscve24.core.issued.pc (issue
   stage — commit-valid signal 없음. speculative 오염 가능성 인지하고 진행 중).
 - GitHub 토큰: 대화마다 새로 받아야 함 (fine-grained, WaveScope repo에

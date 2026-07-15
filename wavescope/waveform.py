@@ -4,28 +4,52 @@
     prepare_for_scan(...) -> a VCD path usable by scan (converting if needed)
 """
 
+import os
 import sys
 from typing import Iterator, List, Optional, Tuple
 
 from . import fsdb as fsdb_mod
+from . import trn as trn_mod
 from .vcd_reader import (changes_to_ticks, get_timescale, iter_pc_changes,
                          iter_pc_samples, parse_period)
 
 
 class WaveConfig(object):
     __slots__ = ("verdi_home", "fsdb_scope", "fsdbreport_args",
-                 "fsdb2vcd_args")
+                 "fsdb2vcd_args", "cadence_bin", "simvisdbutil_args")
 
     def __init__(self, verdi_home=None, fsdb_scope=None,
-                 fsdbreport_args=None, fsdb2vcd_args=None):
+                 fsdbreport_args=None, fsdb2vcd_args=None,
+                 cadence_bin=None, simvisdbutil_args=None):
         self.verdi_home = verdi_home
         self.fsdb_scope = fsdb_scope
         self.fsdbreport_args = fsdbreport_args if fsdbreport_args is not None else []
         self.fsdb2vcd_args = fsdb2vcd_args if fsdb2vcd_args is not None else []
+        self.cadence_bin = cadence_bin
+        self.simvisdbutil_args = simvisdbutil_args if simvisdbutil_args is not None else []
 
 
 def _is_fsdb(path: str) -> bool:
     return path.lower().endswith(".fsdb")
+
+
+def _is_trn(path: str) -> bool:
+    low = path.lower()
+    return low.endswith(".trn") or low.endswith(".shm") or \
+        (os.path.isdir(path) and any(n.endswith(".trn")
+                                     for n in os.listdir(path)))
+
+
+def _trn_to_vcd(path: str, cfg: "WaveConfig") -> str:
+    tool = trn_mod.find_simvisdbutil(cfg.cadence_bin)
+    if not tool:
+        raise trn_mod.TrnError(trn_mod.no_tool_msg())
+    print("[wavescope] TRN/SHM: converting via simvisdbutil (%s)%s"
+          % (tool, ", scope=%s" % cfg.fsdb_scope if cfg.fsdb_scope
+             else " -- consider --fsdb-scope to speed this up"),
+          file=sys.stderr)
+    return trn_mod.convert_to_vcd(path, tool, scope=cfg.fsdb_scope,
+                                  extra_args=cfg.simvisdbutil_args)
 
 
 def _no_tools_msg(tools: "fsdb_mod.VerdiTools") -> str:
@@ -44,6 +68,8 @@ def open_pc_stream(path: str, clock: Optional[str], pc: str,
                    cfg: Optional[WaveConfig] = None,
                    ) -> Iterator[Tuple[int, int]]:
     cfg = cfg or WaveConfig()
+    if _is_trn(path):
+        path = _trn_to_vcd(path, cfg)
     if not _is_fsdb(path):
         if clock:
             return iter_pc_samples(path, clock, pc,
@@ -92,6 +118,8 @@ def open_pc_stream(path: str, clock: Optional[str], pc: str,
 def prepare_for_scan(path: str, cfg: Optional[WaveConfig] = None) -> str:
     """Return a VCD path for the scanner, converting FSDB if necessary."""
     cfg = cfg or WaveConfig()
+    if _is_trn(path):
+        return _trn_to_vcd(path, cfg)
     if not _is_fsdb(path):
         return path
     tools = fsdb_mod.find_tools(cfg.verdi_home)
