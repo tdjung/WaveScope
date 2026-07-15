@@ -21,7 +21,7 @@ from . import __version__
 from .callgrind import write as write_callgrind
 from .classify import get_classifier, load_isa_spec
 from .disasm import load_binary, text_ranges
-from .profiler import EVENTS, run
+from .profiler import EVENTS, DebugTrace, run
 from .scan import explain as explain_signal, scan as scan_signals
 from .waveform import WaveConfig, open_pc_stream, prepare_for_scan
 
@@ -169,7 +169,10 @@ def cmd_profile(args) -> int:
                          with_lines=not args.no_lines,
                          demangle=not args.no_demangle)
     print(f"[wavescope]   {len(binary.insns)} instructions, "
-          f"{len(binary.funcs)} functions", file=sys.stderr)
+          f"{len(binary.funcs)} functions"
+          + (f" ({len(binary.data_syms)} in-text data objects excluded, "
+             f"e.g. {next(iter(sorted(binary.data_syms.values())))})"
+             if binary.data_syms else ""), file=sys.stderr)
 
     classifier = get_classifier(args.isa, args.isa_ext)
 
@@ -178,8 +181,48 @@ def cmd_profile(args) -> int:
                              valid=args.valid, sample_edge=args.edge,
                              clock_period=args.clock_period,
                              cfg=_wave_cfg(args), epc=args.epc)
+    debug = None
+    dbg_out = None
+    if args.debug_func:
+        wanted = [w for arg in args.debug_func for w in arg.split(",") if w]
+        watch = []
+        for w in wanted:
+            f = None
+            if w.lower().startswith("0x"):
+                f = binary.func_at(int(w, 16))
+            if f is None:
+                f = next((x for x in binary.funcs if x.name == w), None)
+            if f is None:   # suffix match (mangled / prefixed names)
+                sufs = [x for x in binary.funcs if x.name.endswith(w)]
+                if len(sufs) == 1:
+                    f = sufs[0]
+                elif len(sufs) > 1:
+                    print(f"[wavescope] --debug-func {w!r} is ambiguous: "
+                          + ", ".join(x.name for x in sufs[:8]),
+                          file=sys.stderr)
+                    return 2
+            if f is None:
+                near = [x.name for x in binary.funcs if w.lower()
+                        in x.name.lower()][:8]
+                print(f"[wavescope] --debug-func {w!r}: no such function"
+                      + (f"; close: {', '.join(near)}" if near else ""),
+                      file=sys.stderr)
+                return 2
+            watch.append(f)
+        dbg_out = open(args.debug_log, "w") if args.debug_log else sys.stderr
+        debug = DebugTrace(binary, watch, dbg_out)
+        print(f"[wavescope] debug trace: watching "
+              + ", ".join(f"{f.name} [0x{f.start:x}-0x{f.end:x})"
+                          for f in watch)
+              + f" -> {args.debug_log or 'stderr'}", file=sys.stderr)
+
     prof = run(samples, binary, classifier,
-               clamp_exception_cycles=not args.no_isr_clamp)
+               clamp_exception_cycles=not args.no_isr_clamp,
+               debug=debug)
+    if dbg_out is not None and dbg_out is not sys.stderr:
+        print(f"[wavescope] debug trace: {debug.events} events -> "
+              f"{args.debug_log}", file=sys.stderr)
+        dbg_out.close()
 
     if args.epc and not prof.epc_mode:
         print(f"[wavescope] WARNING: --epc {args.epc} never carried a "
@@ -315,6 +358,14 @@ def main(argv=None) -> int:
     pp.add_argument("--no-demangle", action="store_true",
                     help="keep mangled C++/Rust symbol names "
                          "(default: demangle via objdump -C)")
+    pp.add_argument("--debug-func", action="append", metavar="NAME",
+                    help="trace cycle accumulation and frame push/pop "
+                         "(inclusive cost) events for this function -- "
+                         "repeatable or comma-separated; accepts a name, "
+                         "unique name suffix, or 0xADDR. See --debug-log")
+    pp.add_argument("--debug-log", metavar="FILE",
+                    help="write --debug-func event log to FILE instead of "
+                         "stderr")
     pp.add_argument("--no-isr-clamp", action="store_true",
                     help="charge full raw cycles at exception/interrupt "
                          "boundaries (default clamps to 1, matching the "

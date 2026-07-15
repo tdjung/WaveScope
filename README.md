@@ -218,8 +218,14 @@ instruction that eventually commits.
 - [x] FSDB input via Verdi tools (fsdbreport / fsdb2vcd)
 - [x] RISC-V, ARM Cortex-M (Thumb-2), AArch64 -- table-driven, JSON data files
 - [x] Custom instruction overlays (mnemonic + encoding matching)
-- [x] `scan`: PC/clock signal candidate discovery
+- [x] `scan`: PC/clock/mepc signal candidate discovery
 - [x] Callgrind output with call tree + inclusive costs
+- [x] Conditional/unconditional jump records (`jcnd=`/`jump=`) for
+      kcachegrind's control-flow arrows in the annotation views
+- [x] `--debug-func NAME [--debug-log FILE]`: per-instruction cycle
+      charging and frame push/pop event log (with pop reasons) for one
+      or more functions, plus a self/inclusive summary -- for diffing
+      against another profiler's numbers
 - [ ] FST input (Verilator/GTKWave open format)
 - [ ] Native FSDB reader binding (libnffr via ctypes)
 - [ ] lcov coverage export (`--lcov`) for multi-run merged coverage

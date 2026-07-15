@@ -8,7 +8,7 @@ from collections import defaultdict
 from typing import Dict, List, TextIO, Tuple
 
 from .disasm import BinaryInfo
-from .profiler import EVENTS, N_EVENTS, Profile
+from .profiler import E_BC, EVENTS, N_EVENTS, Profile
 
 
 def write(prof: Profile, out: TextIO, binary_path: str, cmd: str = "",
@@ -33,6 +33,16 @@ def write(prof: Profile, out: TextIO, binary_path: str, cmd: str = "",
             by_func[f.start].append(pc)
         else:
             orphans.append(pc)
+
+    # jump associations (jcnd= conditional / jump= unconditional) keyed
+    # by source pc; emitted directly before the source's cost line per
+    # the callgrind spec ("an association applies to the following cost
+    # line").  jcnd counts are followed/executed, executed = Bc.
+    jumps_by_src: Dict[int, List[Tuple[str, int, int]]] = defaultdict(list)
+    for (s, d), n in prof.cond_jumps.items():
+        jumps_by_src[s].append(("jcnd", d, n))
+    for (s, d), n in prof.uncond_jumps.items():
+        jumps_by_src[s].append(("jump", d, n))
 
     # calls grouped by the function physically containing the call insn
     calls_by_func: Dict[int, List[Tuple[int, int]]] = defaultdict(list)
@@ -72,7 +82,24 @@ def write(prof: Profile, out: TextIO, binary_path: str, cmd: str = "",
         for pc in pcs:
             _, line = b.line_at(pc)
             costs = prof.self_cost[pc]
-            out.write(f"0x{pc:x} {line} {' '.join(str(v) for v in costs)}\n")
+            specs = jumps_by_src.get(pc)
+            if specs:
+                for k, (kind, dst, n) in enumerate(
+                        sorted(specs, key=lambda x: x[1])):
+                    _, dline = b.line_at(dst)
+                    if kind == "jcnd":
+                        ex = prof.self_cost[pc][E_BC] or n
+                        out.write(f"jcnd={n}/{ex} 0x{dst:x} {dline}\n")
+                    else:
+                        out.write(f"jump={n} 0x{dst:x} {dline}\n")
+                    if k == 0:
+                        out.write(f"0x{pc:x} {line} "
+                                  f"{' '.join(str(v) for v in costs)}\n")
+                    else:
+                        out.write(f"0x{pc:x} {line} 0\n")
+            else:
+                out.write(f"0x{pc:x} {line} "
+                          f"{' '.join(str(v) for v in costs)}\n")
             if pc in call_pcs:
                 _write_call(prof, out, b, pc, call_pcs.pop(pc))
 

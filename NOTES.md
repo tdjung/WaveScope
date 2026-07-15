@@ -1,7 +1,7 @@
 # WaveScope — Project Notes (대화 인수인계용)
 
 > 새 대화 시작 시: 이 파일과 README.md를 먼저 읽고 이어서 작업.
-> 마지막 업데이트: 2026-07-15, v0.8.0
+> 마지막 업데이트: 2026-07-15, v0.9.0
 
 ## 1. 프로젝트 개요
 
@@ -177,28 +177,40 @@ wavescope profile --wave all.vcd --elf fw.elf \
 | v0.6.1 | 정수 tick 변환 (float 정밀도) |
 | v0.6.3–0.7.1 | 의존성 제로 / TRN 지원 / 라이선스 큐 대응 |
 | v0.8.0 | ★ --epc: mepc parsing 기반 정확한 ISR 진입/복귀 (update_epc 이식), profiler를 pending-resolution 파이프라인으로 재편 (인터럽트된 branch를 복귀 후 진짜 착지점으로 판정), WFI wake / 스퓨리어스 억제 / 중첩, multi-signal 추출 인프라 (VCD+fsdbreport), scan epc 후보, flow_anomalies 진단, fsdb2vcd clockless 경로 버그 수정 |
+| v0.9.0 | ★ millicode 수정: jr/c.jr/tail 등을 no_link_mnemonics로 분류 (jr t0 오분류 → __riscv_save inclusive 폭증 = 이슈 6.1 유력 원인). in-text 데이터 심볼(CSWTCH.* 등) 함수 목록 제외 (이슈 6.3). --debug-func/--debug-log: commit별 Cy 청구·frame push/pop(사유 포함)·ISR 이벤트·arc 누적 추적 로그 + 함수별 summary. callgrind jcnd=/jump= 방출 (함수 내 cond/uncond 점프, kcachegrind 화살표) |
 
-테스트: 86개 통과 (tests/). 실 ELF 통합 테스트 포함 (호스트 gcc).
+테스트: 97개 통과 (tests/). 실 ELF 통합 테스트 포함 (호스트 gcc).
 
 ## 6. 미해결 / 검증 대기 이슈 ★ 다음 대화의 시작점
 
-1. **inclusive 값 이상 (최우선)** — v0.6.0/0.6.1 재테스트 결과 대기 중.
-   사용자도 자기 알고리즘 코드를 병행 검토 중. 남은 구조적 차이 후보:
+1. **inclusive 값 이상 (최우선)** — ★ v0.9.0에서 유력 원인 수정:
+   `jr t0`(millicode __riscv_save 복귀)가 operand 규약 탓에
+   writes_link=True로 오분류 → return 매칭(273행 조건의 `not
+   writes_link`)이 안 걸려 save frame이 안 닫히고 caller 본문 전체가
+   save arc inclusive로 유입. 사용자 증상(호출수 ○, self Ir ○,
+   inclusive만 폭증)과 정확히 일치. isa/riscv.json에
+   no_link_mnemonics(jr, c.jr, ret, tail, j 등) 추가로 수정.
+   **실 waveform 재검증 대기** — riscv_save 180138 기대치와 비교할 것.
+   여전히 어긋나면 --debug-func riscv_save --debug-log dbg.log로 frame
+   pop 사유(ret-match/heal/drain)와 arc 누적을 직접 추적 가능 (v0.9.0).
+   남은 구조적 차이 후보:
    - return pop 정책: 시뮬레이터=무조건 top pop vs WaveScope=매칭+healing.
      setjmp/context switch/RTOS task 전환이 있으면 여기서 갈림.
-   - 판별법: stderr 진단의 unmatched 수와 "frames alive at end" 상위
-     함수명을 받아서 추적하기로 함.
-   - 사용자가 "구조 변경을 아직 많이 해야 할 것 같다"고 언급 —
-     profiler.py 구조 리팩토링 논의 예상.
 2. **Bcm 정의 차이 (설계 결정 필요)** — WaveScope=architectural taken,
    시뮬레이터=misprediction. waveform에 mispredict/flush signal을 추가
    dump하면 맞출 수 있음 (--mispredict-signal 옵션 후보).
-3. **함수 개수 검증** — v0.5.0 이후 "functions: N in ELF" 수치가
-   시뮬레이터의 2000+와 맞는지 확인 대기.
+3. ~~함수 개수 검증~~ → **v0.9.0에서 원인 수정**: objdump -d가 .text 내
+   데이터 오브젝트(CSWTCH.* switch table, const 배열)에도 라벨을 찍는데
+   전부 함수로 합류시키고 있었음. symtab의 O 플래그 심볼을 제외하되
+   경계 marker로는 유지 (앞 함수 end가 데이터를 삼키지 않도록).
+   시뮬레이터 함수 수와 재비교 대기.
 4. **ceiling/max call 누락** — 키 수정(v0.6.0)으로 해결 예상이나 재확인
    대기. 남으면 인라이닝 여부를 objdump로 확인 (jal 부재 = 인라인).
 5. **cycle 재검증** — sw 4개 = Ir 1337, Cy 2858/1715/1721/1719 패턴
-   재현 여부 (v0.6.0 도착 귀속의 직접 검증 케이스).
+   재현 여부 (v0.6.0 도착 귀속의 직접 검증 케이스). v0.9.0의
+   --debug-func <함수>로 commit별 Cy 청구 내역(tick, 갭, 누적)을 직접
+   덤프해 시뮬레이터 로그와 라인 단위 대조 가능. millicode 수정이
+   inclusive Cy에도 영향 있으므로 먼저 재측정 권장.
 6. ~~indirect jump 직후 인터럽트 감지 불가~~ → **v0.8.0에서 --epc로 해결**
    (mepc dump 필요 — 사용자에게 waveform에 mepc 추가 dump 요청해야 함).
    실 waveform 검증 대기. epc 모드의 flow_anomalies 수치가 크면
@@ -211,6 +223,19 @@ wavescope profile --wave all.vcd --elf fw.elf \
      다음 commit에서 감지 (1 commit 지연 — 값은 동일하므로 복귀 매칭은 무관).
    - handler에 caller arc 없음 (시뮬레이터 parity) — UI에서 handler
      inclusive가 고아처럼 보이는 게 싫다면 --isr-arc 옵션 추가 검토.
+
+## 6b. 디버깅 도구 (v0.9.0, 사용자와 수치 대조용)
+
+```sh
+wavescope profile ... --debug-func riscv_save --debug-log dbg.log
+# 함수명 / 유일 suffix / 0x주소, 콤마·반복 가능
+```
+로그 이벤트: `commit`(insn별 Cy+n과 함수 self 누적 — 이슈 6.5용),
+`push`/`pop`(frame 여닫힘, pop엔 사유: ret-match/heal/drain/loop-reentry/
+isr-exit/stack-saturated — 이슈 6.1용), `isr enter/exit`(clamp 표시),
+`unmatched-ret`, `flow-anomaly`. 끝에 함수별 self 합계 + incoming arc
+전수(개수·inclusive)와 incl/self 비율 summary. 사용자에게 시뮬레이터
+로그와 같은 함수 구간을 나란히 받아 대조하는 워크플로 제안할 것.
 
 ## 7. 로드맵 (미착수)
 

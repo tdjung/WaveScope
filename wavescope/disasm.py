@@ -38,6 +38,7 @@ class BinaryInfo(object):
         self.funcs = []              # type: List[Func]  (sorted by start)
         self._starts = []            # type: List[int]
         self.lines = {}              # type: Dict[int, Tuple[str, int]]  addr -> (file, line)
+        self.data_syms = {}          # type: Dict[int, str]  in-text data objects (excluded from funcs)
 
     def func_at(self, addr: int) -> Optional[Func]:
         i = bisect.bisect_right(self._starts, addr) - 1
@@ -137,9 +138,22 @@ def load_binary(elf_path: str, toolchain_prefix: str = "",
     sym = subprocess.run([objdump, "-t", *dm, elf_path],
                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, check=True)
     raw_funcs: List[Tuple[int, int, str]] = []
+    data_syms: Dict[int, str] = {}       # objects placed in code sections
     for line in sym.stdout.splitlines():
         m = _SYM_RE.match(line)
         if not m:
+            continue
+        if "O" in m.group(8):
+            # data object: switch tables (CSWTCH.*), const arrays etc.
+            # emitted into .text by the compiler.  objdump -d prints a
+            # label for these too, so remember them BOTH to exclude
+            # them from the function universe AND to cap the previous
+            # function's range at their start.
+            name = m.group(11).strip()
+            for vis in (".hidden ", ".protected ", ".internal "):
+                if name.startswith(vis):
+                    name = name[len(vis):]
+            data_syms[int(m.group(1), 16)] = strip_params(name)
             continue
         if "F" not in m.group(8):
             continue
@@ -155,19 +169,29 @@ def load_binary(elf_path: str, toolchain_prefix: str = "",
     # calls/cfn match the listing. Every range is capped at the next
     # known start: a sized symbol must never swallow a following asm
     # routine that the symbol table does not describe.
+    # only objects the disassembler actually labeled live in code
+    # sections; objects in .data/.rodata never become funcs and must not
+    # act as range boundaries either
+    data_syms = {a: n for a, n in data_syms.items() if a in labels}
     by_start: Dict[int, Tuple[int, str]] = {}
     for start, size, name in sorted(raw_funcs):
         cur = by_start.get(start)
         if cur is None or size > cur[0]:
             by_start[start] = (size, name)
     for addr, name in labels.items():
-        if addr not in by_start:
+        if addr not in by_start and addr not in data_syms:
             by_start[addr] = (0, name)
+    # boundaries include data objects so an unsized asm routine directly
+    # followed by an in-text table does not swallow the table
+    bounds = sorted(set(by_start) | set(data_syms))
+    nxt_of = {}
+    for i, a in enumerate(bounds):
+        nxt_of[a] = bounds[i + 1] if i + 1 < len(bounds) else None
     starts = sorted(by_start)
-    for i, start in enumerate(starts):
+    for start in starts:
         size, name = by_start[start]
         name = labels.get(start, name)
-        nxt = starts[i + 1] if i + 1 < len(starts) else None
+        nxt = nxt_of[start]
         end = start + size if size else (nxt if nxt is not None else start + 4)
         if nxt is not None:
             end = min(end, nxt) if size else end
@@ -175,6 +199,7 @@ def load_binary(elf_path: str, toolchain_prefix: str = "",
                 end = nxt
         info.funcs.append(Func(name=name, start=start, end=max(end, start + 2)))
     info._starts = [f.start for f in info.funcs]
+    info.data_syms = data_syms
 
     # --- source line mapping (DWARF) ----------------------------------
     if with_lines and info.insns:

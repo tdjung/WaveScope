@@ -122,6 +122,10 @@ class Profile:
         # (call_pc, callee_start) -> CallSite   [simulator-style pure-PC key]
         self.calls: Dict[Tuple[int, int], CallSite] = defaultdict(CallSite)
         self.total: List[int] = [0] * N_EVENTS
+        # intra-function control flow for callgrind jcnd=/jump= lines
+        self.cond_jumps: Dict[Tuple[int, int], int] = defaultdict(int)    # (src,dst) -> taken
+        self.uncond_jumps: Dict[Tuple[int, int], int] = defaultdict(int)  # (src,dst) -> count
+        self.debug = None            # optional DebugTrace
         self.unknown_pcs = 0
         self.exceptions = 0
         self.healed_returns = 0
@@ -141,19 +145,126 @@ class Profile:
             fr.acc[ev] += n
 
 
-def _flush_call(prof: Profile, stack: List[FrameCtx], idx: int) -> None:
+class DebugTrace(object):
+    """Event log for --debug-func: traces cycle accumulation and frame
+    push/pop (inclusive-cost) activity touching the watched functions.
+
+    Log lines (grep-friendly, one event per line, Ir/Cy only):
+      commit  every committed insn inside a watched function, with the
+              cycles charged to it and the function's running self totals
+      push    a frame opened whose callee OR call site is watched
+      pop     that frame flushed into its call arc: the frame's
+              accumulated inclusive, the arc's running totals, and WHY
+              it was popped (ret-match / heal / drain / loop / ...)
+      isr     entry/exit, with clamps and saved-pending info
+      anomaly / unmatched-ret involving a watched function
+    A per-function summary (self totals + every incoming arc) is printed
+    at the end of the trace."""
+
+    def __init__(self, binary: BinaryInfo, funcs, out):
+        self.binary = binary
+        self.watch = set(funcs)
+        self.out = out
+        self.tick = None
+        self.acc = {f.start: [0] * N_EVENTS for f in funcs}
+        self.events = 0
+
+    # -- helpers -------------------------------------------------------
+    def _wf(self, pc):
+        if pc is None:
+            return None
+        f = self.binary.func_at(pc)
+        return f if f in self.watch else None
+
+    def _loc(self, pc):
+        if pc is None:
+            return "?"
+        f = self.binary.func_at(pc)
+        if f is None:
+            return f"0x{pc:x}"
+        off = pc - f.start
+        return f"{f.name}+0x{off:x}" if off else f.name
+
+    def _log(self, msg):
+        self.events += 1
+        self.out.write(f"[dbg t={self.tick}] {msg}\n")
+
+    # -- hooks ---------------------------------------------------------
+    def commit(self, pc, insn, cycles):
+        f = self._wf(pc)
+        if f is None:
+            return
+        a = self.acc[f.start]
+        a[E_IR] += 1
+        a[E_CY] += cycles
+        self._log(f"commit {self._loc(pc)} {insn.mnemonic:<8s} "
+                  f"Cy+{cycles} | {f.name} self Ir={a[E_IR]} Cy={a[E_CY]}")
+
+    def push(self, frame, depth):
+        if self._wf(frame.callee_start) is None \
+                and self._wf(frame.call_pc) is None:
+            return
+        kind = "TAIL" if frame.is_tail else "CALL"
+        ra = f"0x{frame.ret_addr:x}" if frame.ret_addr is not None else "?"
+        self._log(f"push {kind} {self._loc(frame.call_pc)} -> "
+                  f"{self._loc(frame.callee_start)} ret={ra} depth={depth}")
+
+    def pop(self, frame, cs, depth_after, why):
+        if self._wf(frame.callee_start) is None \
+                and self._wf(frame.call_pc) is None:
+            return
+        tail = " [tail]" if frame.is_tail else ""
+        arc = "(no arc)" if cs is None else (
+            f"arc n={cs.count} Ir={cs.inclusive[E_IR]} "
+            f"Cy={cs.inclusive[E_CY]}")
+        self._log(f"pop  {self._loc(frame.call_pc)} -> "
+                  f"{self._loc(frame.callee_start)}{tail} "
+                  f"incl Ir={frame.acc[E_IR]} Cy={frame.acc[E_CY]} | "
+                  f"{arc} | depth->{depth_after} ({why})")
+
+    def note(self, msg):
+        self._log(msg)
+
+    def close(self, prof):
+        w = self.out.write
+        w(f"[dbg] --- summary ({self.events} events) ---\n")
+        for f in sorted(self.watch, key=lambda x: x.start):
+            a = self.acc[f.start]
+            w(f"[dbg] {f.name}: self Ir={a[E_IR]} Cy={a[E_CY]}\n")
+            inc_n = inc_ir = inc_cy = 0
+            for (cp, callee), cs in sorted(prof.calls.items()):
+                if callee == f.start:
+                    w(f"[dbg]   in-arc {self._loc(cp)} (0x{cp:x}): "
+                      f"n={cs.count} incl Ir={cs.inclusive[E_IR]} "
+                      f"Cy={cs.inclusive[E_CY]}\n")
+                    inc_n += cs.count
+                    inc_ir += cs.inclusive[E_IR]
+                    inc_cy += cs.inclusive[E_CY]
+            w(f"[dbg]   TOTAL incoming: n={inc_n} Ir={inc_ir} Cy={inc_cy}"
+              f"  (self Ir={a[E_IR]} -> incl/self ratio "
+              f"{inc_ir / a[E_IR]:.2f})\n" if a[E_IR] else
+              f"[dbg]   TOTAL incoming: n={inc_n} Ir={inc_ir} Cy={inc_cy}\n")
+
+
+def _flush_call(prof: Profile, stack: List[FrameCtx], idx: int,
+                why: str = "") -> None:
     fr = stack[idx]
     if fr.call_pc is None or fr.callee_start is None:
+        if prof.debug is not None:
+            prof.debug.pop(fr, None, idx, why)
         return
     cs = prof.calls[(fr.call_pc, fr.callee_start)]
     cs.count += 1
     for e in range(N_EVENTS):
         cs.inclusive[e] += fr.acc[e]
+    if prof.debug is not None:
+        prof.debug.pop(fr, cs, idx, why)
 
 
-def _unwind_to(prof: Profile, stack: List[FrameCtx], depth: int) -> None:
+def _unwind_to(prof: Profile, stack: List[FrameCtx], depth: int,
+               why: str = "") -> None:
     while len(stack) > depth:
-        _flush_call(prof, stack, len(stack) - 1)
+        _flush_call(prof, stack, len(stack) - 1, why)
         stack.pop()
 
 
@@ -170,7 +281,7 @@ def _close_loop_if_reentry(prof: Profile, stack: List[FrameCtx],
         if not fr.is_tail:
             return False          # a real call intervenes: not a loop edge
         if fr.func_start == entry:
-            _unwind_to(prof, stack, i + 1)
+            _unwind_to(prof, stack, i + 1, "loop-reentry")
             return True
     return False
 
@@ -181,11 +292,13 @@ def _push_frame(prof: Profile, stack: List[FrameCtx],
     if len(stack) >= max_stack:
         # saturating: flush-drop the OLDEST frame; silently refusing new
         # pushes would desynchronize call/return matching forever
-        _flush_call(prof, stack, 0)
+        _flush_call(prof, stack, 0, "stack-saturated")
         del stack[0]
         for c in isr_ctxs:
             c.depth = max(0, c.depth - 1)
     stack.append(frame)
+    if prof.debug is not None:
+        prof.debug.push(frame, len(stack))
 
 
 def _unreachable_successor(p: Pending, next_pc: int) -> Tuple[bool, Optional[int]]:
@@ -212,7 +325,8 @@ def _unreachable_successor(p: Pending, next_pc: int) -> Tuple[bool, Optional[int
 
 def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
         classifier, max_stack: int = 4096,
-        clamp_exception_cycles: bool = True) -> Profile:
+        clamp_exception_cycles: bool = True,
+        debug: Optional[DebugTrace] = None) -> Profile:
     """Consume (tick, pc[, epc]) samples and build a Profile.
 
     Each new PC value is one committed instruction.  Its cycle cost is
@@ -225,6 +339,7 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
     commit, enabling exact ISR entry/exit detection (see module doc).
     """
     prof = Profile(binary)
+    prof.debug = dbg = debug
     stack: List[FrameCtx] = []
     isr_ctxs: List[IsrCtx] = []
 
@@ -261,10 +376,25 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
             anom, _ = _unreachable_successor(p, cur_pc)
             if anom:
                 prof.flow_anomalies += 1
+                if dbg is not None and (dbg._wf(p.pc) or dbg._wf(cur_pc)):
+                    dbg.note(f"flow-anomaly {p.insn.mnemonic}@0x{p.pc:x} "
+                             f"-> 0x{cur_pc:x} (unexplained discontinuity)")
 
         cur_func = binary.func_at(p.pc)
         callee_entry = binary.is_func_entry(cur_pc)
         diff_func = cur_func is None or not (cur_func.start <= cur_pc < cur_func.end)
+
+        # --- intra-function control flow (callgrind jcnd=/jump= lines) -----
+        # Cross-function transfers become calls= arcs; returns are not
+        # jumps.  Restricting to the containing function keeps the
+        # annotation arrows kcachegrind actually draws (loops, switch
+        # dispatch) without inventing cross-function jump records.
+        if not p.exc and not diff_func:
+            if cls.is_cond_branch:
+                if taken:
+                    prof.cond_jumps[(p.pc, cur_pc)] += 1
+            elif cls.is_jump and not cls.writes_link and not cls.is_return:
+                prof.uncond_jumps[(p.pc, cur_pc)] += 1
 
         # --- returns: pop frames whose saved link matches cur_pc -----------
         # Tail frames inherit their parent's return address, so a match
@@ -276,7 +406,8 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
                     j = i
                     while j > 0 and stack[j].is_tail:
                         j -= 1
-                    _unwind_to(prof, stack, j)
+                    _unwind_to(prof, stack, j,
+                               f"ret-match {p.insn.mnemonic}@0x{p.pc:x}")
                     return
             if cls.is_return:
                 # Unmatched ret: heal like the simulator -- if we are
@@ -291,12 +422,17 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
                             j = i
                             while j > 0 and stack[j].is_tail:
                                 j -= 1
-                            _unwind_to(prof, stack, j)
+                            _unwind_to(prof, stack, j,
+                                       f"heal ret@0x{p.pc:x}->0x{cur_pc:x}")
                             for c in isr_ctxs:
                                 c.depth = min(c.depth, len(stack))
                             prof.healed_returns += 1
                             return
                 prof.unmatched_returns += 1
+                if prof.debug is not None:
+                    prof.debug.note(
+                        f"unmatched-ret {prof.debug._loc(p.pc)} -> "
+                        f"{prof.debug._loc(cur_pc)} depth={len(stack)}")
                 return
 
         # --- calls ----------------------------------------------------------
@@ -388,6 +524,13 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
                         # it after the handler returns
                         isr_ctxs.append(IsrCtx(depth=len(stack), resume=epc,
                                                saved=pending, kind="epc"))
+                        if dbg is not None:
+                            why = "wfi-wake" if not changed else "mepc-change"
+                            sv = (f" saved-pending={pending.insn.mnemonic}"
+                                  f"@0x{pending.pc:x}" if pending else "")
+                            dbg.note(f"isr enter({why}) handler=0x{pc:x} "
+                                     f"resume=0x{epc:x} depth={len(stack)}"
+                                     f"{sv} clamp Cy {cycles}->1")
                         pending = None
                         prof.exceptions += 1
                         if clamp_exception_cycles:
@@ -402,10 +545,14 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
                 # pre-interrupt context (works after indirect jumps too)
                 if pc == ctx.resume:
                     isr_ctxs.pop()
-                    _unwind_to(prof, stack, min(ctx.depth, len(stack)))
+                    _unwind_to(prof, stack, min(ctx.depth, len(stack)),
+                               "isr-exit(epc)")
                     pending = ctx.saved          # discard the xret pending;
                     epc_suppressed = False       # resolve the interrupted one
                     prev_epc = isr_ctxs[-1].resume if isr_ctxs else ctx.resume
+                    if dbg is not None:
+                        dbg.note(f"isr exit(epc) resume=0x{pc:x} "
+                                 f"depth->{len(stack)} nested={len(isr_ctxs)}")
             elif pending is not None:
                 # heuristic: xret, or a return landing on the recorded
                 # resume address
@@ -413,8 +560,12 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
                         (pending.cls.is_return and ctx.resume is not None
                          and pc == ctx.resume):
                     isr_ctxs.pop()
-                    _unwind_to(prof, stack, min(ctx.depth, len(stack)))
+                    _unwind_to(prof, stack, min(ctx.depth, len(stack)),
+                               "isr-exit(heur)")
                     pending = None
+                    if dbg is not None:
+                        dbg.note(f"isr exit(heur) at 0x{pc:x} "
+                                 f"depth->{len(stack)}")
 
         # --- 2b. heuristic ISR entry (PC-only mode) -------------------------
         if not prof.epc_mode and pending is not None:
@@ -422,6 +573,10 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
             if exc:
                 isr_ctxs.append(IsrCtx(depth=len(stack), resume=resume,
                                        kind="heur"))
+                if dbg is not None:
+                    dbg.note(f"isr enter(heur) handler=0x{pc:x} resume="
+                             f"{hex(resume) if resume else '?'} "
+                             f"depth={len(stack)} clamp Cy {cycles}->1")
                 prof.exceptions += 1
                 if clamp_exception_cycles:
                     cycles = 1
@@ -462,6 +617,9 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
         if cls.is_store:
             prof._update(pc, E_DW, 1, stack)
 
+        if dbg is not None:
+            dbg.commit(pc, insn, cycles)
+
         # --- 6. this instruction now awaits its own successor ----------------
         pending = Pending(pc, insn, cls, target, fallthrough)
         n_committed += 1
@@ -478,6 +636,8 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
         # arrival attribution: THIS instruction pays the gap since the
         # previous commit (floored at 1; local, never carried)
         cycles = 1 if prev_tick is None else max(1, tick - prev_tick)
+        if dbg is not None:
+            dbg.tick = tick
         step(pc, cycles, epc)
         prev_tick, prev_pc = tick, pc
 
@@ -491,5 +651,7 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
     prof.drained_top = sorted(
         ((fr.call_pc or 0, fr.callee_start or fr.func_start, fr.acc[E_IR])
          for fr in stack), key=lambda x: -x[2])[:5]
-    _unwind_to(prof, stack, 0)
+    _unwind_to(prof, stack, 0, "end-of-trace drain")
+    if dbg is not None:
+        dbg.close(prof)
     return prof

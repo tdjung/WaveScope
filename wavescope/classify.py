@@ -85,6 +85,7 @@ class TableClassifier:
         self.link_registers: Set[str] = set(link.get("registers", []))
         self.link_mnemonics: Set[str] = set(link.get("mnemonics", []))
         self.implied_link: Set[str] = set(link.get("implied_link_mnemonics", []))
+        self.no_link: Set[str] = set(link.get("no_link_mnemonics", []))
         self.single_op_link: Set[str] = set(link.get("single_operand_implies_link", []))
 
         self.indirect_if_reg: Set[str] = set(spec.get("indirect_if_reg_operand", []))
@@ -166,7 +167,15 @@ class TableClassifier:
                 c.is_indirect = is_indirect
 
         # --- link (call) ----------------------------------------------------
-        if self.link_convention == "mnemonic":
+        if base in self.no_link:
+            # mnemonics whose FIRST operand is the transfer TARGET, not a
+            # destination register (RISC-V "jr t0" = jalr x0,0(t0)): the
+            # operand heuristic below would misread a link-register-named
+            # target as a link write.  Millicode __riscv_save returns via
+            # "jr t0" -- misclassifying it broke return matching and
+            # inflated the save arc's inclusive cost with the caller body.
+            c.writes_link = False
+        elif self.link_convention == "mnemonic":
             c.writes_link = base in self.link_mnemonics
         else:  # operand
             if base in self.implied_link:
