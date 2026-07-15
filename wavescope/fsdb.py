@@ -206,6 +206,70 @@ def convert_to_vcd(fsdb: str, tool: str, scope: Optional[str] = None,
     return out
 
 
+class _AuxMerge(object):
+    """Time-ordered merge helper: value of one dumped signal 'as of' a
+    query time (inclusive -- a change at exactly the commit time is
+    visible, matching the VCD reader's end-of-timestamp semantics)."""
+    __slots__ = ("vc", "i", "cur")
+
+    def __init__(self, vc):
+        self.vc = vc
+        self.i = 0
+        self.cur = None
+
+    def at(self, t: int):
+        while self.i < len(self.vc) and self.vc[self.i][0] <= t:
+            self.cur = self.vc[self.i][1]
+            self.i += 1
+        return self.cur
+
+
+def iter_commit_changes_fsdbreport(fsdb: str, tool: str, pc: str,
+                                   aux_names=(),
+                                   valid: Optional[str] = None,
+                                   extra_args: Optional[List[str]] = None,
+                                   ) -> Iterator[Tuple]:
+    """(time, pc, *aux) commit changes without a clock signal."""
+    args = extra_args or []
+    auxes = [_AuxMerge(_dump_signal(tool, fsdb, to_fsdb_path(n), args))
+             for n in aux_names]
+    for t, v in iter_pc_changes_fsdbreport(fsdb, tool, pc, valid=valid,
+                                           extra_args=extra_args):
+        yield (t, v) + tuple(a.at(t) for a in auxes)
+
+
+def iter_samples_fsdbreport_multi(fsdb: str, tool: str,
+                                  clock: str, pc: str,
+                                  aux_names=(),
+                                  valid: Optional[str] = None,
+                                  sample_edge: str = "rising",
+                                  extra_args: Optional[List[str]] = None,
+                                  ) -> Iterator[Tuple]:
+    """(tick, pc, *aux) at sampled clock edges."""
+    args = extra_args or []
+    clk_vc = _dump_signal(tool, fsdb, to_fsdb_path(clock), args)
+    pc_m = _AuxMerge(_dump_signal(tool, fsdb, to_fsdb_path(pc), args))
+    val_m = _AuxMerge(_dump_signal(tool, fsdb, to_fsdb_path(valid), args)) \
+        if valid else None
+    auxes = [_AuxMerge(_dump_signal(tool, fsdb, to_fsdb_path(n), args))
+             for n in aux_names]
+
+    want = 1 if sample_edge == "rising" else 0
+    tick = 0
+    prev_clk: Optional[int] = None
+    for t, cv in clk_vc:
+        cur_pc = pc_m.at(t)
+        cur_valid = val_m.at(t) if val_m else 1
+        if cv is None:
+            prev_clk = None
+            continue
+        if prev_clk is not None and prev_clk != cv and cv == want:
+            if cur_valid == 1 and cur_pc is not None:
+                yield (tick, cur_pc) + tuple(a.at(t) for a in auxes)
+            tick += 1
+        prev_clk = cv
+
+
 def iter_pc_changes_fsdbreport(fsdb: str, tool: str, pc: str,
                                valid: Optional[str] = None,
                                extra_args: Optional[List[str]] = None,

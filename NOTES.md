@@ -1,7 +1,7 @@
 # WaveScope — Project Notes (대화 인수인계용)
 
 > 새 대화 시작 시: 이 파일과 README.md를 먼저 읽고 이어서 작업.
-> 마지막 업데이트: 2026-07-15, v0.7.1
+> 마지막 업데이트: 2026-07-15, v0.8.0
 
 ## 1. 프로젝트 개요
 
@@ -42,11 +42,20 @@ wavescope/
 │                       #   - 방언 대응: 탭 구분, real 값, pc[31:0] 붙은 이름
 │                       #   - clockless: iter_pc_changes + changes_to_ticks
 │                       #     (period = delta GCD, tick = 정수 round-half-up)
+│                       #   - multi-signal (v0.8.0): iter_commit_changes /
+│                       #     iter_samples_multi — PC commit마다 aux signal
+│                       #     (mepc 등) 현재값 부착. clockless는 timestamp 끝
+│                       #     기준으로 aux 확정 (같은 cycle의 trap CSR write가
+│                       #     첫 handler insn sample에 보이도록 — 시뮬레이터가
+│                       #     commit 시점에 CSR 읽는 것과 동일). changes_to_ticks는
+│                       #     (t, v, *aux) 튜플 투과
 ├── fsdb.py             # Verdi fsdbreport(신호별 추출 우선) / fsdb2vcd(--fsdb-scope)
 ├── trn.py              # Cadence TRN/SHM → simvisdbutil로 VCD 변환 (v0.7.0, 실환경 미검증)
 ├── waveform.py         # 입력 디스패치 (vcd/fsdb, clocked/clockless)
 ├── scan.py             # PC/clock signal 후보 랭킹 (ELF text range 매칭 0.55
 │                       #   + stride + 이름 + 폭). --json, --explain, signals 서브커맨드
+│                       #   + epc 후보 랭킹 (v0.8.0: 이름에 epc 토큰 필수,
+│                       #     MIN_CHANGES 게이트 없음 — trap은 드물어서)
 ├── profiler.py         # ★ 핵심. 아래 3절 참조
 ├── callgrind.py        # writer. calls 키 = (call_pc, callee) 순수 PC.
 │                       #   기본으로 ELF 전 함수 emit (미실행은 zero-cost, coverage용)
@@ -57,8 +66,10 @@ CLI 예시:
 ```sh
 wavescope profile --wave all.vcd --elf fw.elf \
   --pc blk_cpu.riscve24.core.issued.pc \
+  --epc blk_cpu.riscve24.core.csr.mepc \
   --isa riscv --toolchain-prefix riscv64-unknown-elf- -o callgrind.out
 # clock signal 불필요 (clockless 모드), --clock-period로 override 가능
+# --epc는 선택 (없으면 휴리스틱 ISR 감지). 사용자에게 mepc dump 추가 요청 필요.
 ```
 
 ## 3. profiler.py 핵심 의미론 (시뮬레이터와 맞춘 것들)
@@ -92,13 +103,33 @@ wavescope profile --wave all.vcd --elf fw.elf \
   ③ 그래도 없으면 unmatched 카운트만 하고 무시.
   ※ 시뮬레이터는 RETURN에서 무조건 top pop — 이 차이가 남은 불일치의
   후보임 (미해결 6.1).
-- **exception/ISR**: mepc signal이 없으므로 휴리스틱 감지 —
+- **profiler 구조 (v0.8.0 재편)**: 시뮬레이터 update()와 동일한
+  per-instruction 파이프라인 — ① update_epc(진입) ② ISR exit ③ **pending
+  resolution** (직전 insn의 successor 의존 처리: taken/Bcm 판정,
+  call/tail/return stack ops = check_branch_type+handler_branch 대응)
+  ④ 이벤트 청구 ⑤ pending 기록. pending 구조 덕에 ISR 진입 시 인터럽트된
+  insn의 미해결 상태를 IsrInfo처럼 저장했다가 **복귀 후 진짜 착지점으로
+  해석** — 인터럽트된 branch의 Bcm/call arc가 handler 주소로 오염되지 않음
+  (epc 없이는 구조적으로 불가능했던 부분).
+- **exception/ISR — epc 모드 (v0.8.0, --epc)**: 시뮬레이터 update_epc 이식.
+  진입 = commit 시점 mepc 값 변화, + WFI-wake 규칙 (is_wfi && after_wfi &&
+  착지 함수 ≠ wfi_func — 같은 wfi에서 연속 wake 시 mepc가 동일값으로
+  재기록되는 케이스). 같은 함수 내 epc 변화는 스퓨리어스 억제
+  (epc_error_check 대응, exit에서 해제). 복귀 = 저장한 epc 주소 commit
+  (indirect jump 직후 인터럽트도 정확 — 휴리스틱의 원리적 한계 해소).
+  중첩 지원 (exit 시 prev_epc = 남은 top의 epc — 시뮬레이터와 동일하게
+  handler epilogue의 sw mepc 복원을 가정). handler에는 caller arc를 만들지
+  않음 (시뮬레이터 parity — 휴리스틱 모드의 암묵적 tail push와 다름).
+  진단: spurious_epc, isr_open (epc로 복귀 안 한 ctx = context switch 의심),
+  **flow_anomalies** = ISR로 설명 안 되는 불연속 → issued.pc의 speculative
+  오염 검증용 (사용자 waveform이 commit-valid 없는 issue stage라 중요).
+- **exception/ISR — 휴리스틱 (PC-only, 기존 유지)**:
   "architectural하게 도달 불가능한 successor" (plain insn: next≠fallthrough;
   direct jump: next≠target; cond br: next∉{target,fallthrough}).
   resume PC 기억, mret/sret/uret(또는 resume 복귀)에서 handler 내 frame
   unwind. sleep gap은 첫 handler insn 도착 시 1로 clamp (first_isr_cycle
   대응, --no-isr-clamp로 해제). indirect jump 직후 인터럽트는 원리적으로
-  감지 불가.
+  감지 불가. epc 모드에서도 clamp 동일 적용.
 - **stack 안전장치**: max_stack=4096, 포화 시 가장 오래된 frame flush-drop.
   종료 시 _unwind_to(0) = 시뮬레이터 remain_call_stack_process() 동등.
 - **진단 출력** (stderr): healed/unmatched return 수, 종료 시 잔존 frame
@@ -144,8 +175,10 @@ wavescope profile --wave all.vcd --elf fw.elf \
 | v0.5.1 | carry 폐기(지역 floor — stall 보존), loop closure, 진단 카운터 |
 | v0.6.0 | ★ cycle 도착 귀속, calls 순수 PC 키, Call/TailCall 이벤트 제거 |
 | v0.6.1 | 정수 tick 변환 (float 정밀도) |
+| v0.6.3–0.7.1 | 의존성 제로 / TRN 지원 / 라이선스 큐 대응 |
+| v0.8.0 | ★ --epc: mepc parsing 기반 정확한 ISR 진입/복귀 (update_epc 이식), profiler를 pending-resolution 파이프라인으로 재편 (인터럽트된 branch를 복귀 후 진짜 착지점으로 판정), WFI wake / 스퓨리어스 억제 / 중첩, multi-signal 추출 인프라 (VCD+fsdbreport), scan epc 후보, flow_anomalies 진단, fsdb2vcd clockless 경로 버그 수정 |
 
-테스트: 62개 통과 (tests/). 실 ELF 통합 테스트 포함 (호스트 gcc).
+테스트: 86개 통과 (tests/). 실 ELF 통합 테스트 포함 (호스트 gcc).
 
 ## 6. 미해결 / 검증 대기 이슈 ★ 다음 대화의 시작점
 
@@ -166,11 +199,24 @@ wavescope profile --wave all.vcd --elf fw.elf \
    대기. 남으면 인라이닝 여부를 objdump로 확인 (jal 부재 = 인라인).
 5. **cycle 재검증** — sw 4개 = Ir 1337, Cy 2858/1715/1721/1719 패턴
    재현 여부 (v0.6.0 도착 귀속의 직접 검증 케이스).
-6. **indirect jump 직후 인터럽트** 감지 불가 — mepc/trap signal dump
-   옵션(--trap-signal) 검토.
+6. ~~indirect jump 직후 인터럽트 감지 불가~~ → **v0.8.0에서 --epc로 해결**
+   (mepc dump 필요 — 사용자에게 waveform에 mepc 추가 dump 요청해야 함).
+   실 waveform 검증 대기. epc 모드의 flow_anomalies 수치가 크면
+   issued.pc의 speculative 오염 신호 → commit-valid signal 추가 dump 논의.
+7. **epc 모드 미검증 가정들** (실환경 확인 필요):
+   - handler epilogue가 mepc를 복원한다는 가정 (중첩 시 prev_epc 처리,
+     시뮬레이터와 동일한 가정). 복원 안 하는 FW면 mret 후 스퓨리어스 진입
+     1회 발생 가능 (진입 즉시 pc==epc로 exit되어 실害는 적을 것으로 예상).
+   - clocked 샘플링에서 같은 edge에 clk 라인보다 늦게 dump된 mepc 변화는
+     다음 commit에서 감지 (1 commit 지연 — 값은 동일하므로 복귀 매칭은 무관).
+   - handler에 caller arc 없음 (시뮬레이터 parity) — UI에서 handler
+     inclusive가 고아처럼 보이는 게 싫다면 --isr-arc 옵션 추가 검토.
 
 ## 7. 로드맵 (미착수)
 
+- --mispredict-signal: Bcm을 시뮬레이터 정의(misprediction)로 맞추기 —
+  v0.8.0의 multi-signal(aux) 인프라로 signal 추출은 이미 가능,
+  branch commit과 mispredict pulse의 파이프라인 시차 정렬이 과제 (이슈 6.2)
 - lcov coverage export (--lcov) → 다중 시나리오 병합 coverage
   (같은 binary=주소 병합, 다른 binary=소스라인 병합; MoveMyCode에
   N개 파일 로드 시 coverage 전용 모드 — 대화에서 방향 합의됨)

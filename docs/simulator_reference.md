@@ -440,10 +440,17 @@ void remain_call_stack_process() {
 | RETURN의 tail 연쇄 while pop | `commit()` return 블록의 tail-chain walk + `_unwind_to()` |
 | `calls[caller_pc][callee_pc]` | `Profile.calls[(call_pc, callee)]` (v0.6.0에서 일치시킴) |
 | `Cy_direct = cur − last_committed` (현재 insn 귀속) | `pend_cycles = max(1, t_i − t_{i−1})` (v0.6.0에서 일치시킴) |
-| `first_isr_cycle` → 1 clamp | exception 감지 시 `clamp_next` → 첫 handler insn 1 |
-| mepc CSR 변화로 ISR 감지 | 휴리스틱: 도달 불가능한 successor (indirect 직후는 감지 불가) |
-| ISR stack-of-stack 대피 | 단일 stack + `IsrCtx(depth)` 마커 |
-| check_branch_type 4) caller 착지 → RETURN | unmatched ret healing (`commit()` return 블록) |
+| `first_isr_cycle` → 1 clamp | ISR 진입 감지된 첫 handler insn의 `cycles = 1` |
+| mepc CSR 변화로 ISR 감지 | **v0.8.0 `--epc`: 동일 (mepc signal parsing)**. PC-only일 땐 휴리스틱(도달 불가능한 successor, indirect 직후 감지 불가) fallback |
+| update_epc의 같은 함수 epc 변화 → epc_error_check | `epc_suppressed` — 동일 (exit에서 해제) |
+| is_wfi/after_wfi/wfi_func + wfi_in/out_handler | 동일 이식 (`step()`의 wfi tracking, mnemonic wfi/wfe) |
+| IsrInfo에 last_pc/branchType/taken 대피, 복귀 후 재해석 | `IsrCtx.saved`에 `Pending`(미해결 직전 insn) 저장 → `pc == resume` commit에서 복원, 진짜 착지점으로 resolve — 동일 |
+| `is_isr && isr_stack.top().epc == base` 복귀 | `pc == isr_ctxs[-1].resume` commit — 동일 |
+| 중첩 exit 시 `prev_epc = isr_stack.top().epc` | 동일 (handler epilogue의 mepc 복원 가정 공유) |
+| ISR stack-of-stack 대피 | 단일 stack + `IsrCtx(depth)` 마커 (exit 시 depth까지 unwind = handler 내 frame flush와 동치) |
+| check_branch_type 4) caller 착지 → RETURN | unmatched ret healing (`resolve()` return 블록) |
+| check_branch_type + handler_branch (착지점 확정 후 처리) | **v0.8.0: `Pending` + `resolve()` — 구조 자체를 일치시킴** |
 | RETURN 시 무조건 top pop | ret_addr 정확 매칭 우선 + healing 보조 — **정책 차이, 미해결 이슈 6.1** |
 | save helper real_caller 치환 | 미구현 — ret_addr 매칭으로 자연 해소된다고 보고 있으나 검증 필요 |
 | remain_call_stack_process() | `run()` 말미 `_unwind_to(prof, stack, 0)` + 잔존 frame 진단 출력 |
+| (해당 없음 — 시뮬레이터는 항상 정확) | epc 모드 한정 `flow_anomalies`: ISR로 설명 안 되는 불연속 = speculative PC 오염 진단 |

@@ -86,13 +86,14 @@ class ParseStats(object):
 
 
 class ScanResult(object):
-    __slots__ = ("pc_candidates", "clock_candidates", "vec_stats",
-                 "clk_stats", "parse")
+    __slots__ = ("pc_candidates", "clock_candidates", "epc_candidates",
+                 "vec_stats", "clk_stats", "parse")
 
     def __init__(self, pc_candidates, clock_candidates, vec_stats,
-                 clk_stats, parse):
+                 clk_stats, parse, epc_candidates=None):
         self.pc_candidates = pc_candidates
         self.clock_candidates = clock_candidates
+        self.epc_candidates = epc_candidates if epc_candidates is not None else []
         self.vec_stats = vec_stats       # signal full name -> stats
         self.clk_stats = clk_stats
         self.parse = parse
@@ -231,11 +232,12 @@ def scan(vcd_path: str,
 
     pcs = _rank_pcs(vec, text_ranges, isa_strides)
     clks = _rank_clks(clk)
+    epcs = _rank_epcs(vec, text_ranges)
     return ScanResult(pc_candidates=pcs[:top_n],
                       clock_candidates=clks[:top_n],
                       vec_stats={s.sig.name: s for s in vec.values()},
                       clk_stats={s.sig.name: s for s in clk.values()},
-                      parse=ps)
+                      parse=ps, epc_candidates=epcs[:top_n])
 
 
 def score_vector(st: SigStats,
@@ -282,6 +284,45 @@ def _rank_pcs(vec: Dict[str, SigStats],
     if not out:                     # nothing above floor: show best anyway
         fallback.sort(key=lambda c: c.score, reverse=True)
         return fallback
+    return out
+
+
+def _rank_epcs(vec: Dict[str, SigStats],
+               text_ranges: Optional[List[Tuple[int, int]]]) -> List[Candidate]:
+    """Rank likely exception-PC CSR signals (mepc/sepc/epc) for --epc.
+
+    Unlike the PC itself an epc register changes RARELY (once per trap)
+    and holds code addresses, so: name is required ('epc' token), text
+    ratio dominates when an ELF is given, and the MIN_CHANGES gate is
+    NOT applied (a run with a handful of interrupts is normal)."""
+    out: List[Candidate] = []
+    for st in vec.values():
+        last = st.sig.name.split(".")[-1].lower()
+        toks = re.split(r"[^a-z0-9]+", last)
+        strong = any(t in ("mepc", "sepc", "uepc") for t in toks)
+        weak = "epc" in toks or last.endswith("epc")
+        if not (strong or weak):
+            continue
+        name_s = 1.0 if strong else 0.7
+        text_r = (st.text_hits / st.text_total) \
+            if (text_ranges is not None and st.text_total) else 0.0
+        width_s = 1.0 if st.sig.width in (32, 64) else \
+            (0.5 if 24 <= st.sig.width <= 64 else 0.0)
+        if text_ranges is not None:
+            score = 0.5 * text_r + 0.35 * name_s + 0.15 * width_s
+        else:
+            score = 0.7 * name_s + 0.3 * width_s
+        reasons = [f"name hints exception PC ({last})"]
+        if st.text_total:
+            reasons.append(f"{text_r * 100:.0f}% of values in ELF text "
+                           f"sections")
+        reasons.append(f"width={st.sig.width}, {st.changes} changes "
+                       f"(traps are rare: low counts are expected)")
+        if st.changes == 0:
+            reasons.append("never changed in this dump (no traps, or "
+                           "value section not parsed)")
+        out.append(Candidate(st.sig.name, st.sig.width, score, reasons))
+    out.sort(key=lambda c: c.score, reverse=True)
     return out
 
 

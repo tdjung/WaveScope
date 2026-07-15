@@ -10,8 +10,9 @@ from typing import Iterator, List, Optional, Tuple
 
 from . import fsdb as fsdb_mod
 from . import trn as trn_mod
-from .vcd_reader import (changes_to_ticks, get_timescale, iter_pc_changes,
-                         iter_pc_samples, parse_period)
+from .vcd_reader import (changes_to_ticks, get_timescale,
+                         iter_commit_changes, iter_pc_changes,
+                         iter_pc_samples, iter_samples_multi, parse_period)
 
 
 class WaveConfig(object):
@@ -76,19 +77,32 @@ def open_pc_stream(path: str, clock: Optional[str], pc: str,
                    sample_edge: str = "rising",
                    clock_period: Optional[str] = None,
                    cfg: Optional[WaveConfig] = None,
-                   ) -> Iterator[Tuple[int, int]]:
+                   epc: Optional[str] = None,
+                   ) -> Iterator[Tuple]:
+    """Yield (tick, pc) samples -- or (tick, pc, epc_value) when an epc
+    signal name is given (epc rides along as the CSR value in effect at
+    each commit; the profiler uses it for exact ISR entry/exit)."""
     cfg = cfg or WaveConfig()
+    aux = (epc,) if epc else ()
     if _is_trn(path):
         path = _trn_to_vcd(path, cfg)
     if not _is_fsdb(path):
         if clock:
+            if aux:
+                return iter_samples_multi(path, clock, pc, aux_names=aux,
+                                          sample_edge=sample_edge,
+                                          valid_name=valid)
             return iter_pc_samples(path, clock, pc,
                                    sample_edge=sample_edge, valid_name=valid)
         # clockless: derive cycle grid from PC change times
         period = None
         if clock_period:
             period = parse_period(clock_period, get_timescale(path))
-        changes = iter_pc_changes(path, pc, valid_name=valid)
+        if aux:
+            changes = iter_commit_changes(path, pc, aux_names=aux,
+                                          valid_name=valid)
+        else:
+            changes = iter_pc_changes(path, pc, valid_name=valid)
         period, samples = changes_to_ticks(changes, period=period)
         print(f"[wavescope] no clock signal: using "
               f"{'given' if clock_period else 'auto-detected'} period of "
@@ -101,12 +115,22 @@ def open_pc_stream(path: str, clock: Optional[str], pc: str,
         print(f"[wavescope] FSDB: extracting signals via fsdbreport "
               f"({tools.fsdbreport})", file=sys.stderr)
         if clock:
+            if aux:
+                return fsdb_mod.iter_samples_fsdbreport_multi(
+                    path, tools.fsdbreport, clock, pc, aux_names=aux,
+                    valid=valid, sample_edge=sample_edge,
+                    extra_args=cfg.fsdbreport_args)
             return fsdb_mod.iter_pc_samples_fsdbreport(
                 path, tools.fsdbreport, clock, pc, valid=valid,
                 sample_edge=sample_edge, extra_args=cfg.fsdbreport_args)
-        changes = fsdb_mod.iter_pc_changes_fsdbreport(
-            path, tools.fsdbreport, pc, valid=valid,
-            extra_args=cfg.fsdbreport_args)
+        if aux:
+            changes = fsdb_mod.iter_commit_changes_fsdbreport(
+                path, tools.fsdbreport, pc, aux_names=aux, valid=valid,
+                extra_args=cfg.fsdbreport_args)
+        else:
+            changes = fsdb_mod.iter_pc_changes_fsdbreport(
+                path, tools.fsdbreport, pc, valid=valid,
+                extra_args=cfg.fsdbreport_args)
         period = int(clock_period) if clock_period else None
         period, samples = changes_to_ticks(changes, period=period)
         print(f"[wavescope] no clock signal: period={period} "
@@ -122,8 +146,10 @@ def open_pc_stream(path: str, clock: Optional[str], pc: str,
                                       scope=cfg.fsdb_scope,
                                       extra_args=cfg.fsdb2vcd_args,
                                       reconvert=cfg.reconvert)
-        return iter_pc_samples(vcd, clock, pc,
-                               sample_edge=sample_edge, valid_name=valid)
+        # recurse on the converted VCD: same clocked/clockless dispatch
+        return open_pc_stream(vcd, clock, pc, valid=valid,
+                              sample_edge=sample_edge,
+                              clock_period=clock_period, cfg=cfg, epc=epc)
     raise fsdb_mod.FsdbError(_no_tools_msg(tools))
 
 

@@ -111,7 +111,9 @@ def cmd_scan(args) -> int:
 
     if args.json:
         print(json.dumps({"pc_candidates": [c.to_dict() for c in pcs],
-                          "clock_candidates": [c.to_dict() for c in clks]},
+                          "clock_candidates": [c.to_dict() for c in clks],
+                          "epc_candidates": [c.to_dict()
+                                             for c in res.epc_candidates]},
                          indent=2))
         return 0
 
@@ -126,11 +128,15 @@ def cmd_scan(args) -> int:
 
     show("PC signal candidates:", pcs)
     show("Clock signal candidates:", clks)
+    if res.epc_candidates:
+        show("Exception-PC (mepc) candidates for --epc:", res.epc_candidates)
     if pcs and clks:
+        epc_hint = f"--epc {res.epc_candidates[0].name} " \
+            if res.epc_candidates else ""
         print(f"\nNext step:\n  wavescope profile --wave {args.wave} "
               f"--elf {args.elf or '<elf>'} \\\n"
               f"      --clock {clks[0].name} --pc {pcs[0].name} "
-              f"[--valid <commit_valid>] -o callgrind.out.wavescope")
+              f"{epc_hint}[--valid <commit_valid>] -o callgrind.out.wavescope")
     return 0
 
 
@@ -171,13 +177,33 @@ def cmd_profile(args) -> int:
     samples = open_pc_stream(args.wave, args.clock, args.pc,
                              valid=args.valid, sample_edge=args.edge,
                              clock_period=args.clock_period,
-                             cfg=_wave_cfg(args))
+                             cfg=_wave_cfg(args), epc=args.epc)
     prof = run(samples, binary, classifier,
                clamp_exception_cycles=not args.no_isr_clamp)
 
-    if prof.exceptions:
+    if args.epc and not prof.epc_mode:
+        print(f"[wavescope] WARNING: --epc {args.epc} never carried a "
+              f"defined value; fell back to heuristic ISR detection. "
+              f"Check the signal with 'wavescope signals --grep epc'.",
+              file=sys.stderr)
+    if prof.epc_mode:
+        print(f"[wavescope] epc mode: {prof.exceptions} ISR entries "
+              f"(mepc change / wfi wake), {prof.spurious_epc} spurious "
+              f"same-function epc changes suppressed"
+              + (f", {prof.isr_open} ISR contexts never returned to their "
+                 f"epc (context switch inside a handler?)"
+                 if prof.isr_open else ""), file=sys.stderr)
+        if prof.flow_anomalies:
+            print(f"[wavescope] WARNING: {prof.flow_anomalies} control-flow "
+                  f"discontinuities NOT explained by an ISR -- if the PC "
+                  f"signal is pre-commit (issue stage), these are likely "
+                  f"speculative/flushed instructions polluting the profile",
+                  file=sys.stderr)
+    elif prof.exceptions:
         print(f"[wavescope] detected {prof.exceptions} exception/interrupt "
-              f"entries (boundary cycles "
+              f"entries via heuristic (pass --epc <mepc signal> for exact "
+              f"detection incl. interrupts after indirect jumps; boundary "
+              f"cycles "
               f"{'clamped to 1' if not args.no_isr_clamp else 'kept raw'})",
               file=sys.stderr)
     if prof.healed_returns or prof.unmatched_returns:
@@ -267,6 +293,13 @@ def main(argv=None) -> int:
                     help="program counter signal (prefer commit-stage PC)")
     pp.add_argument("--valid", default=None,
                     help="optional commit-valid signal; PC sampled only when 1")
+    pp.add_argument("--epc", default=None,
+                    help="optional exception PC CSR signal (mepc). Enables "
+                         "exact ISR entry/exit detection: entry on mepc "
+                         "value change, exit on committing the saved epc "
+                         "address -- covers interrupts after indirect jumps "
+                         "and defers interrupted-branch judgement to the "
+                         "true landing, matching the reference simulator")
     pp.add_argument("--edge", choices=["rising", "falling"], default="rising")
     pp.add_argument("--isa", default="riscv",
                     help="riscv | armv7m (Cortex-M/Thumb-2) | aarch64")

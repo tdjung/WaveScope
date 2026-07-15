@@ -288,6 +288,160 @@ def _vec_to_int(bits: str) -> Optional[int]:
 
 
 # ----------------------------------------------------------------------
+# Multi-signal extraction: PC commits with attached auxiliary values
+# (epc/mepc, mispredict, ... -- anything the profiler wants to read
+# "as of this commit").
+# ----------------------------------------------------------------------
+def _parse_value_line(c0: str, line: str) -> Tuple[Optional[str], Optional[int]]:
+    """Parse one VCD value-change line -> (ident, int_value|None)."""
+    if c0 in "bBrR":
+        parts = line.split()
+        if len(parts) < 2:
+            return None, None
+        tok = parts[0][1:]
+        if c0 in "rR":
+            try:
+                return parts[1], int(float(tok))
+            except (ValueError, OverflowError):
+                return parts[1], None
+        return parts[1], _vec_to_int(tok)
+    # scalar: 0/1/x/z immediately followed by the ident
+    return line[1:], _vec_to_int(c0)
+
+
+def iter_commit_changes(path: str, pc_name: str,
+                        aux_names: Tuple[str, ...] = (),
+                        valid_name: Optional[str] = None,
+                        ) -> Iterator[Tuple]:
+    """Yield (time, pc_value, *aux_values) at each PC commit (clockless).
+
+    Commit points are PC value changes (valid-gated like
+    iter_pc_changes).  Aux values are the signal values in effect AFTER
+    all value changes at the emission timestamp have been applied: a
+    trap that writes mepc in the same cycle as the PC redirect is
+    therefore already visible at the first handler instruction's sample,
+    matching a simulator that reads CSR state at commit time.  Aux
+    values are None while the signal is x/z or has not changed yet.
+    """
+    with open_vcd_text(path) as f:
+        signals, _ = read_header(f)
+        pc = find_signal(signals, pc_name)
+        valid = find_signal(signals, valid_name) if valid_name else None
+        aux = [find_signal(signals, n) for n in aux_names]
+
+        pc_id = pc.ident
+        valid_id = valid.ident if valid else None
+        aux_idx: Dict[str, int] = {}
+        for i, s in enumerate(aux):
+            aux_idx[s.ident] = i
+        aux_cur: List[Optional[int]] = [None] * len(aux)
+
+        t = 0
+        cur_pc: Optional[int] = None
+        cur_valid: Optional[int] = 1 if valid_id is None else None
+        pend: List[int] = []       # pc values committed at timestamp t
+
+        for raw in f:
+            line = raw.strip()
+            if not line:
+                continue
+            c0 = line[0]
+            if c0 == "#":
+                if pend:           # timestamp advances: aux is now final
+                    snap = tuple(aux_cur)
+                    for v in pend:
+                        yield (t, v) + snap
+                    pend = []
+                try:
+                    t = int(line[1:].split()[0])
+                except (ValueError, IndexError):
+                    pass
+                continue
+            if c0 == "$":
+                continue
+            ident, v = _parse_value_line(c0, line)
+            if ident is None:
+                continue
+            if ident == pc_id:
+                if v is not None:
+                    cur_pc = v
+                    if cur_valid == 1:
+                        pend.append(v)
+            elif ident in aux_idx:
+                aux_cur[aux_idx[ident]] = v
+            elif valid_id is not None and ident == valid_id:
+                if v == 1 and cur_valid != 1 and cur_pc is not None:
+                    pend.append(cur_pc)   # rising valid re-commits current PC
+                cur_valid = v
+        if pend:
+            snap = tuple(aux_cur)
+            for v in pend:
+                yield (t, v) + snap
+
+
+def iter_samples_multi(path: str, clock_name: str, pc_name: str,
+                       aux_names: Tuple[str, ...] = (),
+                       sample_edge: str = "rising",
+                       valid_name: Optional[str] = None,
+                       ) -> Iterator[Tuple]:
+    """Clocked variant: yield (tick, pc_value, *aux_values) at sampled
+    clock edges (valid-gated like iter_pc_samples).  Aux values are the
+    ones seen up to the edge; a same-edge CSR write dumped after the
+    clock line lands on the next sample, which the profiler's
+    change-based detection tolerates (one commit of latency at worst)."""
+    with open_vcd_text(path) as f:
+        signals, _ = read_header(f)
+        clk = find_signal(signals, clock_name)
+        pc = find_signal(signals, pc_name)
+        valid = find_signal(signals, valid_name) if valid_name else None
+        aux = [find_signal(signals, n) for n in aux_names]
+
+        clk_id, pc_id = clk.ident, pc.ident
+        valid_id = valid.ident if valid else None
+        aux_idx: Dict[str, int] = {}
+        for i, s in enumerate(aux):
+            aux_idx[s.ident] = i
+        aux_cur: List[Optional[int]] = [None] * len(aux)
+
+        cur_pc: Optional[str] = "x"
+        cur_valid: Optional[int] = 1 if valid_id is None else None
+        prev_clk = "x"
+        tick = 0
+        want_rise = sample_edge == "rising"
+
+        for raw in f:
+            line = raw.strip()
+            if not line:
+                continue
+            c0 = line[0]
+            if c0 == "#" or c0 == "$":
+                continue
+            if c0 in "01xXzZ" and line[1:] == clk_id:
+                v = c0.lower()
+                edge = (prev_clk == "0" and v == "1") if want_rise \
+                    else (prev_clk == "1" and v == "0")
+                if edge:
+                    if valid_id is None or cur_valid == 1:
+                        pcv = _vec_to_int(cur_pc or "x")
+                        if pcv is not None:
+                            yield (tick, pcv) + tuple(aux_cur)
+                    tick += 1
+                prev_clk = v
+                continue
+            ident, v = _parse_value_line(c0, line)
+            if ident is None:
+                continue
+            if ident == pc_id:
+                # keep raw bits so x/z propagation matches iter_pc_samples
+                cur_pc = line.split()[0][1:] if c0 in "bB" else \
+                    (bin(v)[2:] if v is not None else "x")
+            elif ident in aux_idx:
+                aux_cur[aux_idx[ident]] = v
+            elif valid_id is not None and ident == valid_id:
+                cur_valid = v
+
+
+# ----------------------------------------------------------------------
 # Clockless operation: derive cycles from event times
 # ----------------------------------------------------------------------
 def iter_pc_changes(path: str, pc_name: str,
@@ -377,11 +531,13 @@ def get_timescale(path: str) -> int:
     return ts
 
 
-def changes_to_ticks(changes: Iterator[Tuple[int, int]],
+def changes_to_ticks(changes: Iterator[Tuple],
                      period: Optional[int] = None,
                      warmup: int = 2048,
-                     ) -> Tuple[int, Iterator[Tuple[int, int]]]:
-    """Convert (time, value) changes to (clock_tick, value) samples.
+                     ) -> Tuple[int, Iterator[Tuple]]:
+    """Convert (time, value, ...) changes to (clock_tick, value, ...)
+    samples.  Any elements after the leading timestamp (e.g. an attached
+    epc value) are passed through untouched.
 
     If period is None it is auto-detected as the GCD of the time deltas
     of the first `warmup` changes (all RTL events sit on the clock grid,
@@ -395,8 +551,9 @@ def changes_to_ticks(changes: Iterator[Tuple[int, int]],
     if period is None:
         prev_t: Optional[int] = None
         g = 0
-        for t, v in changes:
-            buf.append((t, v))
+        for ch in changes:
+            buf.append(ch)
+            t = ch[0]
             if prev_t is not None and t > prev_t:
                 g = math.gcd(g, t - prev_t)
             prev_t = t
@@ -410,13 +567,14 @@ def changes_to_ticks(changes: Iterator[Tuple[int, int]],
 
     p = period
 
-    def gen() -> Iterator[Tuple[int, int]]:
+    def gen() -> Iterator[Tuple]:
         # integer round-half-up: float division loses precision for
         # large timestamps (fs-scale dumps exceed float53 quickly)
         t0: Optional[int] = None
-        for t, v in itertools.chain(buf, changes):
+        for ch in itertools.chain(buf, changes):
+            t = ch[0]
             if t0 is None:
                 t0 = t
-            yield (t - t0 + p // 2) // p, v
+            yield ((t - t0 + p // 2) // p,) + tuple(ch[1:])
 
     return p, gen()

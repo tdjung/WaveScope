@@ -159,6 +159,38 @@ so multi-million-cycle dumps stream at the same speed. If auto-detection
 is not desired, pass `--clock-period 10ns` (or a plain integer in dump
 time units).
 
+### Interrupts: dump mepc and pass `--epc`
+
+If the waveform also contains the exception PC CSR (RISC-V `mepc`,
+found by `wavescope scan` under "Exception-PC candidates"), pass it:
+
+```sh
+wavescope profile --wave sim.vcd --elf fw.elf \
+    --pc  cpu.core.issued.pc \
+    --epc cpu.core.csr.mepc \
+    -o callgrind.out.wavescope
+```
+
+ISR boundaries are then detected exactly instead of heuristically:
+
+- **entry** = an mepc value change at a commit (plus a WFI-wake rule for
+  back-to-back interrupts that rewrite mepc with the same value) --
+  this also catches interrupts arriving right after *indirect* jumps,
+  which no PC-only heuristic can see;
+- **exit** = committing the saved epc address, so tail-chained handlers
+  and non-`mret` returns unwind correctly, including nested interrupts;
+- an interrupted branch/call is *judged after the handler returns*,
+  against its true landing address -- its taken/not-taken counts and
+  call arc are not polluted by the handler address;
+- an mepc change landing in the same function as the current pc is
+  treated as spurious and suppressed (CSR save/restore traffic);
+- any remaining control-flow discontinuity *not* explained by an ISR is
+  reported as a `flow anomaly` -- a useful smoke test for whether the
+  chosen PC signal carries speculative (pre-commit) values.
+
+Without `--epc`, the previous heuristic (architecturally unreachable
+successor = entry, `mret`/return-to-resume = exit) remains in effect.
+
 Compressed or binary files named `.vcd` are handled transparently:
 gzip/bzip2/xz are decompressed on the fly, and FST/LXT2/VZT are
 converted via the GTKWave-bundled fst2vcd/lxt2vcd/vzt2vcd if present
@@ -191,7 +223,10 @@ instruction that eventually commits.
 - [ ] FST input (Verilator/GTKWave open format)
 - [ ] Native FSDB reader binding (libnffr via ctypes)
 - [ ] lcov coverage export (`--lcov`) for multi-run merged coverage
-- [ ] Interrupt/exception (`epc`) boundary handling
+- [x] Interrupt/exception boundary handling: exact via `--epc <mepc signal>`
+      (entry on mepc change, exit on committing the saved epc, WFI wake,
+      nested ISRs, interrupted-branch judgement deferred to the true
+      landing) with a PC-only heuristic fallback
 - [ ] Multi-hart/core: one PC signal per hart, merged output
 
 ## Development
