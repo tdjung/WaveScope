@@ -27,8 +27,10 @@ class TrnError(Exception):
 _ENV_HOMES = ("XCELIUM_HOME", "CDS_ROOT", "CDS_INST_DIR")
 
 
-def find_simvisdbutil(cadence_bin=None):
-    # type: (Optional[str]) -> Optional[str]
+def find_simvisdbutil(cadence_bin=None, simvisdbutil_bin=None):
+    # type: (Optional[str], Optional[str]) -> Optional[str]
+    if simvisdbutil_bin:
+        return simvisdbutil_bin      # explicit path (site wrapper) wins
     dirs = []  # type: List[str]
     if cadence_bin:
         dirs.append(cadence_bin)
@@ -56,11 +58,17 @@ def resolve_db_path(path):
     return path
 
 
-def convert_to_vcd(path, tool, scope=None, extra_args=None):
-    # type: (str, str, Optional[str], Optional[List[str]]) -> str
+def convert_to_vcd(path, tool, scope=None, extra_args=None,
+                   reconvert=False):
+    # type: (str, str, Optional[str], Optional[List[str]], bool) -> str
+    from .fsdb import _cache_path, cache_fresh
     trn = resolve_db_path(path)
-    out = os.path.join(tempfile.gettempdir(),
-                       os.path.basename(trn) + ".wavescope.vcd")
+    out = _cache_path(trn, scope, "trn")
+    if not reconvert and cache_fresh(trn, out):
+        import sys
+        print("[wavescope] reusing cached conversion %s "
+              "(--reconvert to force)" % out, file=sys.stderr)
+        return out
     cmd = [tool, trn, "-vcd", "-output", out, "-overwrite"]
     if scope:
         cmd += ["-scope", scope, "-recursive"]

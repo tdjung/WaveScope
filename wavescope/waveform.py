@@ -16,11 +16,19 @@ from .vcd_reader import (changes_to_ticks, get_timescale, iter_pc_changes,
 
 class WaveConfig(object):
     __slots__ = ("verdi_home", "fsdb_scope", "fsdbreport_args",
-                 "fsdb2vcd_args", "cadence_bin", "simvisdbutil_args")
+                 "fsdb2vcd_args", "cadence_bin", "simvisdbutil_args",
+                 "fsdbreport_bin", "fsdb2vcd_bin", "simvisdbutil_bin",
+                 "reconvert")
 
     def __init__(self, verdi_home=None, fsdb_scope=None,
                  fsdbreport_args=None, fsdb2vcd_args=None,
-                 cadence_bin=None, simvisdbutil_args=None):
+                 cadence_bin=None, simvisdbutil_args=None,
+                 fsdbreport_bin=None, fsdb2vcd_bin=None,
+                 simvisdbutil_bin=None, reconvert=False):
+        self.fsdbreport_bin = fsdbreport_bin
+        self.fsdb2vcd_bin = fsdb2vcd_bin
+        self.simvisdbutil_bin = simvisdbutil_bin
+        self.reconvert = reconvert
         self.verdi_home = verdi_home
         self.fsdb_scope = fsdb_scope
         self.fsdbreport_args = fsdbreport_args if fsdbreport_args is not None else []
@@ -41,7 +49,8 @@ def _is_trn(path: str) -> bool:
 
 
 def _trn_to_vcd(path: str, cfg: "WaveConfig") -> str:
-    tool = trn_mod.find_simvisdbutil(cfg.cadence_bin)
+    tool = trn_mod.find_simvisdbutil(cfg.cadence_bin,
+                                     cfg.simvisdbutil_bin)
     if not tool:
         raise trn_mod.TrnError(trn_mod.no_tool_msg())
     print("[wavescope] TRN/SHM: converting via simvisdbutil (%s)%s"
@@ -49,7 +58,8 @@ def _trn_to_vcd(path: str, cfg: "WaveConfig") -> str:
              else " -- consider --fsdb-scope to speed this up"),
           file=sys.stderr)
     return trn_mod.convert_to_vcd(path, tool, scope=cfg.fsdb_scope,
-                                  extra_args=cfg.simvisdbutil_args)
+                                  extra_args=cfg.simvisdbutil_args,
+                                  reconvert=cfg.reconvert)
 
 
 def _no_tools_msg(tools: "fsdb_mod.VerdiTools") -> str:
@@ -85,7 +95,8 @@ def open_pc_stream(path: str, clock: Optional[str], pc: str,
               f"{period} dump time units as 1 cycle", file=sys.stderr)
         return samples
 
-    tools = fsdb_mod.find_tools(cfg.verdi_home)
+    tools = fsdb_mod.find_tools(cfg.verdi_home,
+                                cfg.fsdbreport_bin, cfg.fsdb2vcd_bin)
     if tools.fsdbreport:
         print(f"[wavescope] FSDB: extracting signals via fsdbreport "
               f"({tools.fsdbreport})", file=sys.stderr)
@@ -109,7 +120,8 @@ def open_pc_stream(path: str, clock: Optional[str], pc: str,
               file=sys.stderr)
         vcd = fsdb_mod.convert_to_vcd(path, tools.fsdb2vcd,
                                       scope=cfg.fsdb_scope,
-                                      extra_args=cfg.fsdb2vcd_args)
+                                      extra_args=cfg.fsdb2vcd_args,
+                                      reconvert=cfg.reconvert)
         return iter_pc_samples(vcd, clock, pc,
                                sample_edge=sample_edge, valid_name=valid)
     raise fsdb_mod.FsdbError(_no_tools_msg(tools))
@@ -122,7 +134,8 @@ def prepare_for_scan(path: str, cfg: Optional[WaveConfig] = None) -> str:
         return _trn_to_vcd(path, cfg)
     if not _is_fsdb(path):
         return path
-    tools = fsdb_mod.find_tools(cfg.verdi_home)
+    tools = fsdb_mod.find_tools(cfg.verdi_home,
+                                cfg.fsdbreport_bin, cfg.fsdb2vcd_bin)
     if not tools.fsdb2vcd:
         raise fsdb_mod.FsdbError(
             "Scanning an FSDB requires fsdb2vcd (fsdbreport needs known "
@@ -135,4 +148,5 @@ def prepare_for_scan(path: str, cfg: Optional[WaveConfig] = None) -> str:
           file=sys.stderr)
     return fsdb_mod.convert_to_vcd(path, tools.fsdb2vcd,
                                    scope=cfg.fsdb_scope,
-                                   extra_args=cfg.fsdb2vcd_args)
+                                   extra_args=cfg.fsdb2vcd_args,
+                                      reconvert=cfg.reconvert)

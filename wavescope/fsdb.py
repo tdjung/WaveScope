@@ -37,20 +37,28 @@ class VerdiTools(object):
         self.fsdb2vcd = fsdb2vcd
 
 
-def find_tools(verdi_home: Optional[str] = None) -> VerdiTools:
+def find_tools(verdi_home: Optional[str] = None,
+               fsdbreport_bin: Optional[str] = None,
+               fsdb2vcd_bin: Optional[str] = None) -> VerdiTools:
+    """Explicit --*-bin paths win unconditionally: license-queued sites
+    often front vendor tools with wrapper scripts, and tool-home
+    discovery must not bypass them."""
     dirs: List[str] = []
     home = verdi_home or os.environ.get("VERDI_HOME")
     if home:
         dirs += [os.path.join(home, "bin"), home]
 
-    def find(name: str) -> Optional[str]:
+    def find(name: str, explicit: Optional[str]) -> Optional[str]:
+        if explicit:
+            return explicit
         for d in dirs:
             p = os.path.join(d, name)
             if os.path.isfile(p) and os.access(p, os.X_OK):
                 return p
         return shutil.which(name)
 
-    return VerdiTools(fsdbreport=find("fsdbreport"), fsdb2vcd=find("fsdb2vcd"))
+    return VerdiTools(fsdbreport=find("fsdbreport", fsdbreport_bin),
+                      fsdb2vcd=find("fsdb2vcd", fsdb2vcd_bin))
 
 
 def to_fsdb_path(name: str) -> str:
@@ -158,11 +166,34 @@ def iter_pc_samples_fsdbreport(fsdb: str, tool: str,
 # ----------------------------------------------------------------------
 # Path 2: fsdb2vcd conversion (scope-restricted)
 # ----------------------------------------------------------------------
+def _cache_path(src: str, scope: Optional[str], kind: str) -> str:
+    tag = "" if not scope else "." + "".join(
+        c if c.isalnum() else "_" for c in scope)
+    return os.path.join(tempfile.gettempdir(),
+                        os.path.basename(src) + tag
+                        + ".wavescope." + kind + ".vcd")
+
+
+def cache_fresh(src: str, out: str) -> bool:
+    """Reuse a previous conversion if it is newer than the source --
+    every skipped conversion is a license checkout (and possibly a
+    queue wait) saved on license-managed sites."""
+    try:
+        return (os.path.exists(out) and os.path.getsize(out) > 0
+                and os.path.getmtime(out) >= os.path.getmtime(src))
+    except OSError:
+        return False
+
+
 def convert_to_vcd(fsdb: str, tool: str, scope: Optional[str] = None,
                    extra_args: Optional[List[str]] = None,
-                   keep: bool = False) -> str:
-    out = os.path.join(tempfile.gettempdir(),
-                       os.path.basename(fsdb) + ".wavescope.vcd")
+                   keep: bool = False, reconvert: bool = False) -> str:
+    out = _cache_path(fsdb, scope, "fsdb")
+    if not reconvert and cache_fresh(fsdb, out):
+        import sys
+        print("[wavescope] reusing cached conversion %s "
+              "(--reconvert to force)" % out, file=sys.stderr)
+        return out
     cmd = [tool, fsdb, "-o", out]
     if scope:
         cmd += ["-s", scope if scope.startswith("/") else to_fsdb_path(scope)]

@@ -57,3 +57,37 @@ class TestTrnDispatch(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestConversionCache(unittest.TestCase):
+    def test_cache_fresh_logic(self):
+        import time
+        from wavescope.fsdb import _cache_path, cache_fresh
+        with tempfile.TemporaryDirectory() as d:
+            src = os.path.join(d, "a.fsdb")
+            open(src, "w").write("x")
+            out = os.path.join(d, "a.vcd")
+            self.assertFalse(cache_fresh(src, out))       # 캐시 없음
+            time.sleep(0.02)
+            open(out, "w").write("converted")
+            self.assertTrue(cache_fresh(src, out))        # 최신 캐시
+            time.sleep(0.02)
+            open(src, "w").write("xx")                    # 원본 갱신
+            self.assertFalse(cache_fresh(src, out))
+            open(out, "w").write("")                      # 빈 파일은 무효
+            self.assertFalse(cache_fresh(src, out))
+
+    def test_cache_path_scoped(self):
+        from wavescope.fsdb import _cache_path
+        a = _cache_path("/x/w.fsdb", None, "fsdb")
+        b = _cache_path("/x/w.fsdb", "top.cpu0", "fsdb")
+        self.assertNotEqual(a, b)                          # scope별 분리
+
+    def test_explicit_bin_wins(self):
+        from wavescope.fsdb import find_tools
+        t = find_tools(verdi_home="/nonexistent",
+                       fsdbreport_bin="/site/wrap/fsdbreport")
+        self.assertEqual(t.fsdbreport, "/site/wrap/fsdbreport")
+        from wavescope.trn import find_simvisdbutil
+        self.assertEqual(find_simvisdbutil(simvisdbutil_bin="/w/svdb"),
+                         "/w/svdb")

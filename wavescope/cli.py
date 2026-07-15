@@ -43,6 +43,17 @@ def _add_wave_args(p: argparse.ArgumentParser) -> None:
                         "(default: $XCELIUM_HOME/$CDS_ROOT tools/bin, PATH)")
     p.add_argument("--simvisdbutil-args", default="",
                    help="extra simvisdbutil args, ':' separated")
+    p.add_argument("--fsdbreport-bin", default=None,
+                   help="exact fsdbreport executable/wrapper to run "
+                        "(overrides discovery; for license-queue wrappers)")
+    p.add_argument("--fsdb2vcd-bin", default=None,
+                   help="exact fsdb2vcd executable/wrapper to run")
+    p.add_argument("--simvisdbutil-bin", default=None,
+                   help="exact simvisdbutil executable/wrapper to run")
+    p.add_argument("--reconvert", action="store_true",
+                   help="ignore cached FSDB/TRN->VCD conversions and "
+                        "convert again (default reuses a conversion newer "
+                        "than the source, saving license checkouts)")
 
 
 def _wave_cfg(args) -> WaveConfig:
@@ -52,7 +63,11 @@ def _wave_cfg(args) -> WaveConfig:
         fsdbreport_args=[a for a in args.fsdbreport_args.split(":") if a],
         fsdb2vcd_args=[a for a in args.fsdb2vcd_args.split(":") if a],
         cadence_bin=args.cadence_bin,
-        simvisdbutil_args=[a for a in args.simvisdbutil_args.split(":") if a])
+        simvisdbutil_args=[a for a in args.simvisdbutil_args.split(":") if a],
+        fsdbreport_bin=args.fsdbreport_bin,
+        fsdb2vcd_bin=args.fsdb2vcd_bin,
+        simvisdbutil_bin=args.simvisdbutil_bin,
+        reconvert=args.reconvert)
 
 
 def cmd_scan(args) -> int:
