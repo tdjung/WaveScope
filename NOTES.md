@@ -1,7 +1,7 @@
 # WaveScope — Project Notes (대화 인수인계용)
 
 > 새 대화 시작 시: 이 파일과 README.md를 먼저 읽고 이어서 작업.
-> 마지막 업데이트: 2026-07-09, v0.6.1 (commit ec0fded)
+> 마지막 업데이트: 2026-07-15, v0.7.1
 
 ## 1. 프로젝트 개요
 
@@ -190,6 +190,18 @@ wavescope profile --wave all.vcd --elf fw.elf \
   override 제공. 실환경 미검증.
 - TRN/SHM(Cadence)은 simvisdbutil 변환 경로 (--cadence-bin/$XCELIUM_HOME/
   $CDS_ROOT/PATH 탐색, --simvisdbutil-args override). 역시 실환경 미검증.
+- **라이선스 큐 환경 대응 (v0.7.1)**: EDA 도구(fsdbreport/fsdb2vcd/
+  simvisdbutil)는 자식 프로세스로 실행되며 환경변수(LM_LICENSE_FILE 등)
+  상속 → 라이선스 요청/큐 대기는 도구 자신이 수행, timeout 없음.
+  사이트 wrapper 스크립트 지정용 --fsdbreport-bin/--fsdb2vcd-bin/
+  --simvisdbutil-bin (탐색보다 우선). FSDB/TRN→VCD 변환 캐시
+  (원본보다 최신이면 재사용, scope별 분리, --reconvert로 강제) —
+  반복 분석 시 라이선스 재체크아웃 방지.
+- 벤더/도구 구분: FSDB=Synopsys(Verdi의 fsdbreport/fsdb2vcd),
+  TRN/SHM=Cadence(Xcelium/SimVision의 simvisdbutil, VCD 변환 전용).
+  라이선스 필요 도구는 이 3개뿐, VCD 경로는 완전 무의존.
+  fsdbreport는 signal당 1회 실행(체크아웃 2-3회)이라 큐가 긴 사이트는
+  fsdb2vcd 1회 변환+캐시가 유리할 수 있음.
 - 사용자 waveform의 PC signal: blk_cpu.riscve24.core.issued.pc (issue
   stage — commit-valid signal 없음. speculative 오염 가능성 인지하고 진행 중).
 - GitHub 토큰: 대화마다 새로 받아야 함 (fine-grained, WaveScope repo에
