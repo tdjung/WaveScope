@@ -352,8 +352,11 @@ def main(argv=None) -> int:
                     help="binutils prefix, e.g. riscv64-unknown-elf-, "
                          "arm-none-eabi-, aarch64-linux-gnu-")
     pp.add_argument("--executed-only", action="store_true",
-                    help="emit only executed functions (default emits every "
-                         "ELF function, unexecuted ones at zero cost, for "
+                    help="emit only executed PCs/functions (default emits "
+                         "every instruction of every ELF function, "
+                         "unexecuted ones at zero cost, for coverage: "
+                         "zero-cost code = present but never executed, "
+                         "absent code = compiled out; also used for "
                          "coverage views and simulator parity)")
     pp.add_argument("--no-demangle", action="store_true",
                     help="keep mangled C++/Rust symbol names "

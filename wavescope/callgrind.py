@@ -8,7 +8,7 @@ from collections import defaultdict
 from typing import Dict, List, TextIO, Tuple
 
 from .disasm import BinaryInfo
-from .profiler import E_BC, EVENTS, N_EVENTS, Profile
+from .profiler import EVENTS, N_EVENTS, Profile
 
 
 def write(prof: Profile, out: TextIO, binary_path: str, cmd: str = "",
@@ -71,35 +71,50 @@ def write(prof: Profile, out: TextIO, binary_path: str, cmd: str = "",
 
         call_pcs = {cp: callee for cp, callee in calls_by_func.get(fstart, [])}
 
-        if not pcs and not call_pcs:
-            # never executed: keep the function visible (coverage view,
-            # function-count parity with simulator output) at zero cost
+        # Coverage emission: every instruction of the function appears,
+        # executed ones with real costs and the rest at zero, so
+        # never-executed code inside the ELF is distinguishable from
+        # code compiled out of the ELF entirely.  --executed-only
+        # falls back to cost-bearing pcs alone.
+        f = b.func_at(fstart)
+        if all_functions and f is not None:
+            emit_pcs = sorted(a for a in b.insns
+                              if f.start <= a < f.end) or pcs
+        else:
+            emit_pcs = pcs
+
+        if not emit_pcs and not call_pcs:
+            # not represented in the disassembly (e.g. PLT-less import):
+            # keep the function visible at zero cost
             _, line = b.line_at(fstart)
             out.write(f"0x{fstart:x} {line} "
                       f"{' '.join('0' for _ in range(N_EVENTS))}\n\n")
             continue
 
-        for pc in pcs:
+        zeros = [0] * N_EVENTS
+        for pc in emit_pcs:
             _, line = b.line_at(pc)
-            costs = prof.self_cost[pc]
+            costs = prof.self_cost.get(pc, zeros)
+            out.write(f"0x{pc:x} {line} "
+                      f"{' '.join(str(v) for v in costs)}\n")
+            # jump associations AFTER the source's cost line, each
+            # followed by a position-only line (the cost line the
+            # association attaches to, at the same source position):
+            #   0xSRC LINE <costs>
+            #   jcnd=30/100 0xT1 L1
+            #   0xSRC LINE
+            #   jcnd=70/100 0xT2 L2
+            #   0xSRC LINE
             specs = jumps_by_src.get(pc)
             if specs:
-                for k, (kind, dst, n) in enumerate(
-                        sorted(specs, key=lambda x: x[1])):
+                total = sum(n for kind, _, n in specs if kind == "jcnd")
+                for kind, dst, n in sorted(specs, key=lambda x: -x[2]):
                     _, dline = b.line_at(dst)
                     if kind == "jcnd":
-                        ex = prof.self_cost[pc][E_BC] or n
-                        out.write(f"jcnd={n}/{ex} 0x{dst:x} {dline}\n")
+                        out.write(f"jcnd={n}/{total or n} 0x{dst:x} {dline}\n")
                     else:
                         out.write(f"jump={n} 0x{dst:x} {dline}\n")
-                    if k == 0:
-                        out.write(f"0x{pc:x} {line} "
-                                  f"{' '.join(str(v) for v in costs)}\n")
-                    else:
-                        out.write(f"0x{pc:x} {line} 0\n")
-            else:
-                out.write(f"0x{pc:x} {line} "
-                          f"{' '.join(str(v) for v in costs)}\n")
+                    out.write(f"0x{pc:x} {line}\n")
             if pc in call_pcs:
                 _write_call(prof, out, b, pc, call_pcs.pop(pc))
 

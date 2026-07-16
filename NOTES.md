@@ -1,7 +1,7 @@
 # WaveScope — Project Notes (대화 인수인계용)
 
 > 새 대화 시작 시: 이 파일과 README.md를 먼저 읽고 이어서 작업.
-> 마지막 업데이트: 2026-07-15, v0.9.0
+> 마지막 업데이트: 2026-07-16, v0.10.0
 
 ## 1. 프로젝트 개요
 
@@ -74,9 +74,10 @@ wavescope profile --wave all.vcd --elf fw.elf \
 
 ## 3. profiler.py 핵심 의미론 (시뮬레이터와 맞춘 것들)
 
-- **이벤트 (10개)**: Ir Cy Bc Bcm Bi Bim IndJmp DirJmp Dr Dw.
-  Call/TailCall 이벤트 컬럼은 사용자 요청으로 제거 (v0.6.0). call 추적은
-  frame/calls map으로 구조적으로 유지.
+- **이벤트 (8개, v0.10.0)**: Ir Cy Bc Bcm Bi Bim Dr Dw.
+  Call/TailCall 컬럼은 v0.6.0에, IndJmp/DirJmp 컬럼은 v0.10.0에 사용자
+  요청으로 제거. call은 frame/calls map, 점프 흐름은 cond_jumps/
+  uncond_jumps (src,dst) arc로 구조적으로 유지.
 - **Cycle attribution (v0.6.0)**: `cycles(pc_i) = max(1, t_i − t_{i−1})` —
   **도착한 instruction이 gap을 문다** (시뮬레이터의 cur−last_committed와 동일).
   이전엔 직전 instruction에 청구해서 stall이 한 칸 밀렸었음.
@@ -177,7 +178,8 @@ wavescope profile --wave all.vcd --elf fw.elf \
 | v0.6.1 | 정수 tick 변환 (float 정밀도) |
 | v0.6.3–0.7.1 | 의존성 제로 / TRN 지원 / 라이선스 큐 대응 |
 | v0.8.0 | ★ --epc: mepc parsing 기반 정확한 ISR 진입/복귀 (update_epc 이식), profiler를 pending-resolution 파이프라인으로 재편 (인터럽트된 branch를 복귀 후 진짜 착지점으로 판정), WFI wake / 스퓨리어스 억제 / 중첩, multi-signal 추출 인프라 (VCD+fsdbreport), scan epc 후보, flow_anomalies 진단, fsdb2vcd clockless 경로 버그 수정 |
-| v0.9.0 | ★ millicode 수정: jr/c.jr/tail 등을 no_link_mnemonics로 분류 (jr t0 오분류 → __riscv_save inclusive 폭증 = 이슈 6.1 유력 원인). in-text 데이터 심볼(CSWTCH.* 등) 함수 목록 제외 (이슈 6.3). --debug-func/--debug-log: commit별 Cy 청구·frame push/pop(사유 포함)·ISR 이벤트·arc 누적 추적 로그 + 함수별 summary. callgrind jcnd=/jump= 방출 (함수 내 cond/uncond 점프, kcachegrind 화살표) |
+| v0.9.0 | ★ millicode 수정: jr/c.jr/tail 등을 no_link_mnemonics로 분류 (jr t0 오분류 → __riscv_save inclusive 폭증 = 이슈 6.1 유력 원인 → 사용자 확인: "많이 좋아졌"으나 잔여 차이 있음). in-text 데이터 심볼 제외 (이슈 6.3 → 사용자 확인: 함수 개수 일치 = 해결). --debug-func/--debug-log. callgrind jcnd=/jump= |
+| v0.10.0 | 사용자 포맷 요구 반영: ① coverage 방출 — ELF code 영역 전체 insn을 zero-cost라도 표기 (미실행 code vs 컴파일 제외 code 구분용; --executed-only로 비활성) ② jump 라인 순서 = cost 라인 → jcnd/jump → position-only 라인(0xPC LINE) 반복 ③ cond branch 양방향 기록 (taken + fall-through, jcnd=30/100·70/100 합=실행수, 분모=방향 합) ④ IndJmp/DirJmp 이벤트 제거 (8개) |
 
 테스트: 97개 통과 (tests/). 실 ELF 통합 테스트 포함 (호스트 gcc).
 
@@ -191,19 +193,17 @@ wavescope profile --wave all.vcd --elf fw.elf \
    inclusive만 폭증)과 정확히 일치. isa/riscv.json에
    no_link_mnemonics(jr, c.jr, ret, tail, j 등) 추가로 수정.
    **실 waveform 재검증 대기** — riscv_save 180138 기대치와 비교할 것.
-   여전히 어긋나면 --debug-func riscv_save --debug-log dbg.log로 frame
-   pop 사유(ret-match/heal/drain)와 arc 누적을 직접 추적 가능 (v0.9.0).
+   → 사용자 확인: "많이 좋아졌"으나 **아직 다른 부분 있음**. 다음 단계:
+   --debug-func <어긋나는 함수> --debug-log dbg.log 로그를 받아 pop
+   사유(ret-match/heal/drain)와 arc 누적 시점을 시뮬레이터와 대조.
    남은 구조적 차이 후보:
    - return pop 정책: 시뮬레이터=무조건 top pop vs WaveScope=매칭+healing.
      setjmp/context switch/RTOS task 전환이 있으면 여기서 갈림.
 2. **Bcm 정의 차이 (설계 결정 필요)** — WaveScope=architectural taken,
    시뮬레이터=misprediction. waveform에 mispredict/flush signal을 추가
    dump하면 맞출 수 있음 (--mispredict-signal 옵션 후보).
-3. ~~함수 개수 검증~~ → **v0.9.0에서 원인 수정**: objdump -d가 .text 내
-   데이터 오브젝트(CSWTCH.* switch table, const 배열)에도 라벨을 찍는데
-   전부 함수로 합류시키고 있었음. symtab의 O 플래그 심볼을 제외하되
-   경계 marker로는 유지 (앞 함수 end가 데이터를 삼키지 않도록).
-   시뮬레이터 함수 수와 재비교 대기.
+3. ~~함수 개수 검증~~ → **해결 확인 (v0.9.0 데이터 심볼 제외 후 사용자가
+   "원래대로 맞아졌"다고 확인).**
 4. **ceiling/max call 누락** — 키 수정(v0.6.0)으로 해결 예상이나 재확인
    대기. 남으면 인라이닝 여부를 objdump로 확인 (jal 부재 = 인라인).
 5. **cycle 재검증** — sw 4개 = Ir 1337, Cy 2858/1715/1721/1719 패턴

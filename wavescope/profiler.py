@@ -11,7 +11,7 @@ each committed instruction is processed in simulator order --
                          -- the simulator's check_branch_type +
                          handler_branch pair
     4. charge events   : Ir, Cy (arrival-attributed), Bc, Bi/Bim,
-                         Dir/IndJmp, Dr, Dw
+                         Dr, Dw
     5. record pending  : this instruction awaits its own successor
 
 Deferring successor resolution through a `pending` record is what lets
@@ -28,8 +28,9 @@ instruction -- "the one that waited pays".  Equivalent to the simulator's
 Call arcs are keyed purely by (call_pc, callee_pc), matching the
 simulator's `calls[caller_pc][callee_pc]` map.
 
-Events: Ir Cy Bc Bcm Bi Bim IndJmp DirJmp Dr Dw.  Calls and tail calls
-are tracked structurally (frames / calls map), not as per-PC events.
+Events: Ir Cy Bc Bcm Bi Bim Dr Dw.  Calls and tail calls are tracked
+structurally (frames / calls map), not as per-PC events; direct/indirect
+jump flow is tracked per (src, dst) arc for jcnd=/jump= output.
 
 ISR detection modes:
   * epc mode (a third stream element carries the mepc CSR value):
@@ -56,10 +57,8 @@ from typing import Dict, Iterable, List, Optional, Tuple
 from .classify import InsnClass
 from .disasm import BinaryInfo, direct_target
 
-EVENTS = ["Ir", "Cy", "Bc", "Bcm", "Bi", "Bim",
-          "IndJmp", "DirJmp", "Dr", "Dw"]
-E_IR, E_CY, E_BC, E_BCM, E_BI, E_BIM, \
-    E_INDJ, E_DIRJ, E_DR, E_DW = range(len(EVENTS))
+EVENTS = ["Ir", "Cy", "Bc", "Bcm", "Bi", "Bim", "Dr", "Dw"]
+E_IR, E_CY, E_BC, E_BCM, E_BI, E_BIM, E_DR, E_DW = range(len(EVENTS))
 N_EVENTS = len(EVENTS)
 
 XRET_MNEMONICS = {"mret", "sret", "uret", "eret"}
@@ -123,7 +122,7 @@ class Profile:
         self.calls: Dict[Tuple[int, int], CallSite] = defaultdict(CallSite)
         self.total: List[int] = [0] * N_EVENTS
         # intra-function control flow for callgrind jcnd=/jump= lines
-        self.cond_jumps: Dict[Tuple[int, int], int] = defaultdict(int)    # (src,dst) -> taken
+        self.cond_jumps: Dict[Tuple[int, int], int] = defaultdict(int)    # (src,dst) -> landings (incl. fall-through)
         self.uncond_jumps: Dict[Tuple[int, int], int] = defaultdict(int)  # (src,dst) -> count
         self.debug = None            # optional DebugTrace
         self.unknown_pcs = 0
@@ -391,8 +390,11 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
         # dispatch) without inventing cross-function jump records.
         if not p.exc and not diff_func:
             if cls.is_cond_branch:
-                if taken:
-                    prof.cond_jumps[(p.pc, cur_pc)] += 1
+                # record BOTH directions (taken target and fall-through):
+                # a split branch emits one jcnd= per landing, and the
+                # per-direction counts sum to the execution count --
+                # branch-coverage information the taken side alone loses
+                prof.cond_jumps[(p.pc, cur_pc)] += 1
             elif cls.is_jump and not cls.writes_link and not cls.is_return:
                 prof.uncond_jumps[(p.pc, cur_pc)] += 1
 
@@ -608,10 +610,6 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
         if cls.is_jump:
             prof._update(pc, E_BI, 1, stack)
             prof._update(pc, E_BIM, 1, stack)
-            if cls.is_indirect:
-                prof._update(pc, E_INDJ, 1, stack)
-            else:
-                prof._update(pc, E_DIRJ, 1, stack)
         if cls.is_load:
             prof._update(pc, E_DR, 1, stack)
         if cls.is_store:

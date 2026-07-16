@@ -21,7 +21,6 @@ PC value per clock tick — but everything else is recoverable:
 | `Cy` (cycles) | clock-tick delta between consecutive commits |
 | `Bc` / `Bcm` (cond. branch / taken) | disassembly says it's a branch; taken if `next_pc != pc + insn_size` |
 | `Bi` / `Bim` (jumps) | disassembly (`jal`, `jalr`, `j`, ...) |
-| `DirJmp` / `IndJmp` | opcode: `jal`/`j` vs `jalr`/`jr`/`ret` |
 | `Call` | link-writing jump (`jal ra`, `jalr ra`) landing on a function entry |
 | `TailCall` | non-link jump landing on a *different* function's entry |
 | `Dr` / `Dw` (loads / stores) | disassembly (`lw`, `sw`, ...) |
@@ -220,8 +219,13 @@ instruction that eventually commits.
 - [x] Custom instruction overlays (mnemonic + encoding matching)
 - [x] `scan`: PC/clock/mepc signal candidate discovery
 - [x] Callgrind output with call tree + inclusive costs
-- [x] Conditional/unconditional jump records (`jcnd=`/`jump=`) for
-      kcachegrind's control-flow arrows in the annotation views
+- [x] Conditional/unconditional jump records (`jcnd=`/`jump=`), both
+      branch directions (taken + fall-through) so per-direction counts
+      sum to the execution count -- branch coverage
+- [x] Full-coverage emission: every instruction in the ELF's code
+      region appears (zero cost if never executed), distinguishing
+      unexecuted code from code compiled out of the binary
+      (`--executed-only` disables)
 - [x] `--debug-func NAME [--debug-log FILE]`: per-instruction cycle
       charging and frame push/pop event log (with pop reasons) for one
       or more functions, plus a self/inclusive summary -- for diffing

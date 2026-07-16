@@ -123,11 +123,37 @@ class TestJumpCollection(unittest.TestCase):
         out = io.StringIO()
         write_callgrind(prof, out, "fw.elf")
         lines = out.getvalue().splitlines()
-        i = lines.index("jcnd=1/2 0x100c 0")
-        # association line directly precedes the source's cost line
-        self.assertTrue(lines[i + 1].startswith("0x1004 0 2 "))
+        # split branch: cost line first, then each jcnd= followed by a
+        # position-only line; per-direction counts sum to the executions
+        i = next(k for k, l in enumerate(lines) if l.startswith("0x1004 0 2 "))
+        self.assertEqual(sorted(lines[i + 1:i + 5]),
+                         sorted(["jcnd=1/2 0x1008 0", "0x1004 0",
+                                 "jcnd=1/2 0x100c 0", "0x1004 0"]))
+        self.assertTrue(lines[i + 1].startswith("jcnd="))
+        self.assertEqual(lines[i + 2], "0x1004 0")
         j = lines.index("jump=1 0x1000 0")
-        self.assertTrue(lines[j + 1].startswith("0x1008 0 "))
+        self.assertTrue(lines[j - 1].startswith("0x1008 0 "))
+        self.assertEqual(lines[j + 1], "0x1008 0")
+
+    def test_branch_both_directions_recorded(self):
+        prof = run(iter(self.TRACE), self._binary(), CL)
+        # 2 executions: one fall-through (0x1008), one taken (0x100c)
+        self.assertEqual(prof.cond_jumps[(0x1004, 0x1008)], 1)
+        self.assertEqual(prof.cond_jumps[(0x1004, 0x100c)], 1)
+
+    def test_full_coverage_zero_lines(self):
+        # never-executed instructions of the ELF appear at zero cost
+        # (coverage: distinguishes unexecuted code from compiled-out code)
+        b = self._binary()
+        b.insns[0x1010] = Insn(0x1010, 4, "nop", "")
+        b.funcs[0].end = 0x1014
+        prof = run(iter(self.TRACE), b, CL)
+        out = io.StringIO()
+        write_callgrind(prof, out, "fw.elf")
+        self.assertIn("0x1010 0 0 0 0 0 0 0 0 0\n", out.getvalue())
+        out2 = io.StringIO()
+        write_callgrind(prof, out2, "fw.elf", all_functions=False)
+        self.assertNotIn("0x1010 0 0", out2.getvalue())
 
     def test_interrupted_branch_not_recorded(self):
         # heuristic ISR entry between beq and its landing: no jcnd entry
