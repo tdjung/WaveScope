@@ -7,6 +7,7 @@ Output: an iterator of (tick_index, pc_value) committed samples, where
 tick_index counts rising edges of the chosen clock signal.
 """
 
+import sys
 import bz2
 import gzip
 import io
@@ -533,7 +534,10 @@ def get_timescale(path: str) -> int:
 
 def changes_to_ticks(changes: Iterator[Tuple],
                      period: Optional[int] = None,
-                     warmup: int = 2048,
+                     warmup: int = 256,
+                     adapt: Optional[bool] = None,
+                     relock_window: int = 64,
+                     on_relock=None,
                      ) -> Tuple[int, Iterator[Tuple]]:
     """Convert (time, value, ...) changes to (clock_tick, value, ...)
     samples.  Any elements after the leading timestamp (e.g. an attached
@@ -542,39 +546,138 @@ def changes_to_ticks(changes: Iterator[Tuple],
     If period is None it is auto-detected as the GCD of the time deltas
     of the first `warmup` changes (all RTL events sit on the clock grid,
     so the GCD converges to the period after a handful of samples).
-    Returns (period_used, sample_iterator).
+
+    Adaptive re-locking (CMU/DVFS): a clock-manager can change the core
+    frequency mid-trace.  A delta that is NOT a multiple of the current
+    period is impossible under a fixed clock (stalls are always whole
+    cycles), so it is hard evidence of a new grid: we buffer the next
+    `relock_window` deltas, re-derive the period from their GCD, and
+    continue on the new grid from the change point.  Detected changes
+    are reported (on_relock(time, old, new) or a stderr note).
+    Limitation: a switch to a SLOWER clock whose period is an exact
+    multiple of the old one is indistinguishable from stalls without the
+    clock signal itself -- dump the clock and use --clock if the CMU can
+    also slow the core down.
+
+    adapt defaults to True when the period is auto-detected and False
+    when an explicit period is given (then a single warning is printed
+    if off-grid deltas show up).  Returns (initial_period, iterator).
     """
     import itertools
     import math
 
+    explicit = period is not None
+    if adapt is None:
+        adapt = not explicit
+
     buf: list = []
     if period is None:
         prev_t: Optional[int] = None
-        g = 0
+        deltas: list = []
         for ch in changes:
             buf.append(ch)
             t = ch[0]
             if prev_t is not None and t > prev_t:
-                g = math.gcd(g, t - prev_t)
+                deltas.append(t - prev_t)
             prev_t = t
-            if len(buf) >= warmup and g > 0:
+            if len(deltas) >= warmup:
                 break
-        if g == 0:
+        if not deltas:
             raise VcdError(
                 "cannot auto-detect clock period: fewer than 2 PC value "
                 "changes found. Pass --clock-period explicitly.")
+        # lock onto the grid of the FIRST deltas only (the GCD converges
+        # within a few dozen 1-cycle-apart commits): if a CMU frequency
+        # change falls inside the warmup, a whole-window GCD would mix
+        # two grids and silently misticks the first region -- with a
+        # head-only lock the change point instead shows up as off-grid
+        # deltas and the adaptive relock handles it like any other
+        head = deltas[:64] if adapt else deltas
+        g = 0
+        for d in head:
+            g = math.gcd(g, d)
         period = g
 
-    p = period
+    p0 = period
+
+    def notify(t, old, new):
+        if on_relock is not None:
+            on_relock(t, old, new)
+        else:
+            print(f"[wavescope] clockless: clock period change detected "
+                  f"at t={t}: {old} -> {new} dump time units per cycle "
+                  f"(CMU/DVFS reconfiguration?)", file=sys.stderr)
 
     def gen() -> Iterator[Tuple]:
         # integer round-half-up: float division loses precision for
         # large timestamps (fs-scale dumps exceed float53 quickly)
-        t0: Optional[int] = None
-        for ch in itertools.chain(buf, changes):
-            t = ch[0]
-            if t0 is None:
-                t0 = t
-            yield ((t - t0 + p // 2) // p,) + tuple(ch[1:])
+        p = p0
+        base_t: Optional[int] = None    # segment origin (time)
+        base_tick = 0                   # segment origin (ticks)
+        prev_t: Optional[int] = None
+        warned_offgrid = False
 
-    return p, gen()
+        def tick(t):
+            return base_tick + (t - base_t + p // 2) // p
+
+        stream = itertools.chain(buf, changes)
+        for ch in stream:
+            t = ch[0]
+            if base_t is None:
+                base_t = prev_t = t
+            d = t - prev_t
+            if d > 0 and d % p != 0:
+                if not adapt:
+                    if not warned_offgrid:
+                        warned_offgrid = True
+                        print(f"[wavescope] WARNING: PC change at t={t} is "
+                              f"off the {p}-unit clock grid -- the clock "
+                              f"frequency may change mid-trace (CMU/DVFS). "
+                              f"Omit --clock-period to enable adaptive "
+                              f"period detection, or dump the clock signal "
+                              f"and pass --clock for exact cycles.",
+                              file=sys.stderr)
+                elif d > 0:
+                    # --- relock: gather a window of deltas on the new grid
+                    rbuf = [ch]
+                    rdeltas = [d]
+                    lt = t
+                    for ch2 in stream:
+                        rbuf.append(ch2)
+                        if ch2[0] > lt:
+                            rdeltas.append(ch2[0] - lt)
+                        lt = ch2[0]
+                        if len(rdeltas) >= relock_window:
+                            break
+                    # the triggering delta may straddle the transition
+                    # (tail of an old cycle + head of a new one), which
+                    # poisons the GCD -- try without it as a fallback
+                    newp = None
+                    for ds in (rdeltas, rdeltas[1:]):
+                        if not ds:
+                            continue
+                        g = 0
+                        for x in ds:
+                            g = math.gcd(g, x)
+                        support = sum(1 for x in ds if x == g)
+                        ambiguous_slower = g >= p and g % p == 0
+                        if g > 0 and g != p and not ambiguous_slower \
+                                and support >= max(2, len(ds) // 16):
+                            newp = g
+                            break
+                    if newp is not None:
+                        # new segment starts at the last on-grid change;
+                        # the straddling gap itself is charged on the new
+                        # grid (one-off, bounded by old_p/new_p cycles)
+                        base_tick = tick(prev_t)
+                        base_t = prev_t
+                        notify(prev_t, p, newp)
+                        p = newp
+                    for ch2 in rbuf:
+                        yield (tick(ch2[0]),) + tuple(ch2[1:])
+                        prev_t = ch2[0]
+                    continue
+            yield (tick(t),) + tuple(ch[1:])
+            prev_t = t
+
+    return p0, gen()

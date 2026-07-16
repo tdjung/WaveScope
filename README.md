@@ -217,7 +217,14 @@ instruction that eventually commits.
 - [x] FSDB input via Verdi tools (fsdbreport / fsdb2vcd)
 - [x] RISC-V, ARM Cortex-M (Thumb-2), AArch64 -- table-driven, JSON data files
 - [x] Custom instruction overlays (mnemonic + encoding matching)
-- [x] `scan`: PC/clock/mepc signal candidate discovery
+- [x] `scan`: PC/clock/mepc signal candidate discovery, plus
+      `--check-epc`: behavioral validation of epc candidates against the
+      PC stream (works for CSR-array elements name ranking cannot find)
+- [x] Adaptive clockless period: mid-trace clock-frequency changes
+      (CMU/DVFS) are detected from off-grid time deltas and re-locked,
+      with each change reported (a switch to a slower clock at an exact
+      multiple of the old period is fundamentally ambiguous without the
+      clock -- dump the clock and use `--clock` in that case)
 - [x] Callgrind output with call tree + inclusive costs
 - [x] Conditional/unconditional jump records (`jcnd=`/`jump=`), both
       branch directions (taken + fall-through) so per-direction counts

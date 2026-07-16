@@ -1,7 +1,7 @@
 # WaveScope — Project Notes (대화 인수인계용)
 
 > 새 대화 시작 시: 이 파일과 README.md를 먼저 읽고 이어서 작업.
-> 마지막 업데이트: 2026-07-16, v0.10.0
+> 마지막 업데이트: 2026-07-16, v0.11.0
 
 ## 1. 프로젝트 개요
 
@@ -179,6 +179,7 @@ wavescope profile --wave all.vcd --elf fw.elf \
 | v0.6.3–0.7.1 | 의존성 제로 / TRN 지원 / 라이선스 큐 대응 |
 | v0.8.0 | ★ --epc: mepc parsing 기반 정확한 ISR 진입/복귀 (update_epc 이식), profiler를 pending-resolution 파이프라인으로 재편 (인터럽트된 branch를 복귀 후 진짜 착지점으로 판정), WFI wake / 스퓨리어스 억제 / 중첩, multi-signal 추출 인프라 (VCD+fsdbreport), scan epc 후보, flow_anomalies 진단, fsdb2vcd clockless 경로 버그 수정 |
 | v0.9.0 | ★ millicode 수정: jr/c.jr/tail 등을 no_link_mnemonics로 분류 (jr t0 오분류 → __riscv_save inclusive 폭증 = 이슈 6.1 유력 원인 → 사용자 확인: "많이 좋아졌"으나 잔여 차이 있음). in-text 데이터 심볼 제외 (이슈 6.3 → 사용자 확인: 함수 개수 일치 = 해결). --debug-func/--debug-log. callgrind jcnd=/jump= |
+| v0.11.0 | ① clockless 적응형 period: CMU/DVFS 중간 주파수 변화 감지·재잠금 (off-grid delta 트리거, 이슈 6.5 = cycle 과소 측정의 1차 원인 수정), 명시 --clock-period 시 off-grid 1회 경고 ② scan --check-epc: epc 후보 행동 검증 (변화값의 .text 적중 / PC 불연속 동시성 / 이후 resume commit — 이름 무관, CSR array 원소도 이름 직접 지정 가능) + verdict |
 | v0.10.0 | 사용자 포맷 요구 반영: ① coverage 방출 — ELF code 영역 전체 insn을 zero-cost라도 표기 (미실행 code vs 컴파일 제외 code 구분용; --executed-only로 비활성) ② jump 라인 순서 = cost 라인 → jcnd/jump → position-only 라인(0xPC LINE) 반복 ③ cond branch 양방향 기록 (taken + fall-through, jcnd=30/100·70/100 합=실행수, 분모=방향 합) ④ IndJmp/DirJmp 이벤트 제거 (8개) |
 
 테스트: 97개 통과 (tests/). 실 ELF 통합 테스트 포함 (호스트 gcc).
@@ -206,11 +207,25 @@ wavescope profile --wave all.vcd --elf fw.elf \
    "원래대로 맞아졌"다고 확인).**
 4. **ceiling/max call 누락** — 키 수정(v0.6.0)으로 해결 예상이나 재확인
    대기. 남으면 인라이닝 여부를 objdump로 확인 (jal 부재 = 인라인).
-5. **cycle 재검증** — sw 4개 = Ir 1337, Cy 2858/1715/1721/1719 패턴
-   재현 여부 (v0.6.0 도착 귀속의 직접 검증 케이스). v0.9.0의
-   --debug-func <함수>로 commit별 Cy 청구 내역(tick, 갭, 누적)을 직접
-   덤프해 시뮬레이터 로그와 라인 단위 대조 가능. millicode 수정이
-   inclusive Cy에도 영향 있으므로 먼저 재측정 권장.
+5. **cycle 재검증** — ★ 1차 원인 규명 (사용자 발견): **CMU가 중간에
+   clock 주기를 변경** (후반부 빨라짐). 기존 구현은 warmup 2048개
+   delta의 GCD로 period를 한 번만 잠갔기 때문에, 이후 빨라진 clock의
+   1-cycle 간격(< period)이 0~1 tick으로 뭉개지고 max(1,·) floor에 걸려
+   latency가 있어도 전부 1 cycle로 나옴 = "예상보다 작게" 증상.
+   → v0.11.0 적응형 period로 수정: period의 배수가 아닌 delta는 고정
+   clock에서 불가능(stall은 항상 정수 cycle)하므로 새 grid의 확실한
+   증거로 보고 relock (window GCD + support 검증, straddle delta 제외
+   fallback, 다중 변화 지원, warmup 내 변화도 head-lock으로 처리).
+   **원리적 한계**: 느려지는 방향이 기존 period의 정배수면 stall과 구분
+   불가 — CMU가 양방향 조절하면 clock dump + --clock이 정답 (아래 6.5b).
+   기존 dump 재실행으로 Cy 재검증 필요; relock 시점/period가 stderr에
+   찍히니 CMU 설정과 대조할 것. sw 4개 = Cy 2858/1715/... 패턴도 재확인.
+5b. **clock dump 권고 판단** — 사용자 질문("clock을 전달해야?")에 대한
+   결론: 이번 케이스(빨라짐)는 clockless 적응형으로 충분. 단 (a) CMU가
+   느려지는 방향(정배수)도 쓰거나 (b) 전환이 잦아 relock window(64
+   commit) 내 오귀속이 신경 쓰이면 core clock 1-bit dump + --clock이
+   유일하게 정확 (cycle = edge count, 주파수 변화에 무관). mcycle CSR
+   dump는 multi-bit가 매 cycle 토글이라 clock보다 비쌈 — 비추.
 6. ~~indirect jump 직후 인터럽트 감지 불가~~ → **v0.8.0에서 --epc로 해결**
    (mepc dump 필요 — 사용자에게 waveform에 mepc 추가 dump 요청해야 함).
    실 waveform 검증 대기. epc 모드의 flow_anomalies 수치가 크면
@@ -239,6 +254,23 @@ isr-exit/stack-saturated — 이슈 6.1용), `isr enter/exit`(clamp 표시),
 
 ## 7. 로드맵 (미착수)
 
+- **ISA별 exception 신호 일반화 (설계 완료, 미구현)**:
+  - AArch64: ELR_EL1/EL2/EL3가 mepc 등가 (resume 주소) — 현행 --epc
+    그대로 동작할 것. scan epc 랭킹에 elr 토큰 추가만 하면 됨.
+  - ARM Cortex-M: epc 없음. IPSR(xPSR[8:0], 현재 exception number)이
+    최적 신호 — **레벨 의미론**이라 새 모드 필요 (--isr-level-signal:
+    진입 = 0→비0 또는 값 변화(선점/중첩), 복귀 = 이전 값 복원).
+    resume 주소는 신호에 없으므로 saved pending의 fallthrough/target
+    추정 + 복귀 착지 매칭(HW가 EXC_RETURN으로 정확히 복귀). IPSR도
+    없으면: ELF vector table(__Vectors/주소 0)에서 handler entry 집합
+    추출 → "call 없이 handler entry 착지" 진입 휴리스틱 강화
+    (--vector-table 옵션 후보). PC 스트림의 0xFFFFFFFx(EXC_RETURN)
+    출현도 exit marker로 활용 가능.
+  - epc 검토 표준 절차 (사용자 안내용): ① scan 이름 랭킹 → ② scan
+    --check-epc 행동 검증 (CSR array면 'wavescope signals --grep csr'로
+    원소 나열 후 --check-epc name1,name2 직접 지정) → ③ profile 실행 후
+    진단 수치 확인 (isr_open≈0, spurious 소수, flow_anomalies 감소) →
+    ④ 신호 부재 시 휴리스틱 fallback (+ 위 vector-table 로드맵).
 - --mispredict-signal: Bcm을 시뮬레이터 정의(misprediction)로 맞추기 —
   v0.8.0의 multi-signal(aux) 인프라로 signal 추출은 이미 가능,
   branch commit과 mispredict pulse의 파이프라인 시차 정렬이 과제 (이슈 6.2)

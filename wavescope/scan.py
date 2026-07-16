@@ -393,3 +393,93 @@ def explain(result: ScanResult, pattern: str,
         if st.changes < MIN_CHANGES:
             lines.append(f"  -> EXCLUDED: fewer than {MIN_CHANGES} changes")
     return "\n".join(lines)
+
+
+# ----------------------------------------------------------------------
+# behavioral epc validation (--check-epc)
+# ----------------------------------------------------------------------
+
+class EpcCheck(object):
+    """Behavioral fit of one epc candidate against the PC stream."""
+    __slots__ = ("name", "changes", "text_hits", "resumed", "disc_aligned",
+                 "expired")
+
+    def __init__(self, name):
+        self.name = name
+        self.changes = 0        # value changes after the baseline
+        self.text_hits = 0      # changed-to values inside ELF .text
+        self.resumed = 0        # ... later committed as a PC (mret return)
+        self.disc_aligned = 0   # change instant coincides with a PC jump
+        self.expired = 0        # changes never resumed within the horizon
+
+    def to_dict(self):
+        return {k: getattr(self, k) for k in self.__slots__}
+
+
+def check_epc_behavior(vcd_path: str, pc_name: str, candidates: List[str],
+                       text_ranges: Optional[List[Tuple[int, int]]] = None,
+                       limit: int = 500000, horizon: int = 8192,
+                       valid: Optional[str] = None) -> List[EpcCheck]:
+    """One streaming pass validating epc candidates by BEHAVIOR, not name.
+
+    A true exception-PC register has a distinctive signature at commit
+    granularity:
+      1. when it changes, the new value is a .text address (the resume
+         point) -- name-agnostic, catches mepc buried in a CSR array;
+      2. the change instant coincides with a PC discontinuity (the
+         redirect into the handler);
+      3. the value is later committed as a PC (the mret return) within
+         a bounded number of commits.
+    Ordering-only checks: works identically for clockless dumps.
+    """
+    from .vcd_reader import iter_commit_changes
+
+    stats = [EpcCheck(n) for n in candidates]
+    last: List[Optional[int]] = [None] * len(candidates)
+    pend: List[List[Tuple[int, int]]] = [[] for _ in candidates]
+    prev_pc: Optional[int] = None
+
+    def in_text(v):
+        if text_ranges is None:
+            return True
+        return any(lo <= v < hi for lo, hi in text_ranges)
+
+    stream = iter_commit_changes(vcd_path, pc_name,
+                                 aux_names=tuple(candidates),
+                                 valid_name=valid)
+    for idx, sample in enumerate(stream):
+        if idx >= limit:
+            break
+        pc = sample[1]
+        aux = sample[2:]
+        disc = prev_pc is not None and not (0 < pc - prev_pc <= 8)
+        for k, v in enumerate(aux):
+            if v is None:
+                continue
+            st = stats[k]
+            changed = v != last[k] and not (last[k] is None and idx == 0)
+            # (x -> value at the very first commit is the trace-start
+            # baseline; x -> value LATER is the first trap, matching the
+            # profiler's semantics)
+            last[k] = v
+            if changed:
+                st.changes += 1
+                if in_text(v):
+                    st.text_hits += 1
+                if disc:
+                    st.disc_aligned += 1
+                pend[k].append((v, idx + horizon))
+            if pend[k]:
+                keep = []
+                for val, exp in pend[k]:
+                    if pc == val:
+                        st.resumed += 1
+                    elif idx > exp:
+                        st.expired += 1
+                    else:
+                        keep.append((val, exp))
+                pend[k] = keep
+        prev_pc = pc
+    for k, st in enumerate(stats):
+        st.expired += len(pend[k])
+    return stats

@@ -109,12 +109,39 @@ def cmd_scan(args) -> int:
         print(explain_signal(res, args.explain, ranges, strides))
         return 0
 
+    # --- behavioral epc validation (--check-epc) -----------------------
+    epc_checks = None
+    if args.check_epc is not None:
+        from .scan import check_epc_behavior
+        cands = [c.name for c in res.epc_candidates]
+        if isinstance(args.check_epc, str):
+            cands += [n for n in args.check_epc.split(",") if n
+                      and n not in cands]
+        pc_sig = args.pc or (pcs[0].name if pcs else None)
+        if not pc_sig:
+            print("[wavescope] --check-epc: no PC candidate found and no "
+                  "--pc given", file=sys.stderr)
+            return 2
+        if not cands:
+            print("[wavescope] --check-epc: no epc candidates by name. "
+                  "mepc may live in a CSR array -- pass explicit names: "
+                  "--check-epc top.cpu.csr.csr_mem_833,... "
+                  "(find them via 'wavescope signals --grep csr')",
+                  file=sys.stderr)
+            return 2
+        print(f"[wavescope] behavioral epc check against pc={pc_sig} "
+              f"(first {args.check_limit} commits)...", file=sys.stderr)
+        epc_checks = check_epc_behavior(vcd, pc_sig, cands,
+                                        text_ranges=ranges,
+                                        limit=args.check_limit)
+
     if args.json:
-        print(json.dumps({"pc_candidates": [c.to_dict() for c in pcs],
-                          "clock_candidates": [c.to_dict() for c in clks],
-                          "epc_candidates": [c.to_dict()
-                                             for c in res.epc_candidates]},
-                         indent=2))
+        d = {"pc_candidates": [c.to_dict() for c in pcs],
+             "clock_candidates": [c.to_dict() for c in clks],
+             "epc_candidates": [c.to_dict() for c in res.epc_candidates]}
+        if epc_checks is not None:
+            d["epc_check"] = [c.to_dict() for c in epc_checks]
+        print(json.dumps(d, indent=2))
         return 0
 
     def show(title, cands):
@@ -130,6 +157,37 @@ def cmd_scan(args) -> int:
     show("Clock signal candidates:", clks)
     if res.epc_candidates:
         show("Exception-PC (mepc) candidates for --epc:", res.epc_candidates)
+    if epc_checks is not None:
+        print("\nBehavioral epc check (a real exception-PC register: value "
+              "changes land in .text,\ncoincide with PC discontinuities, "
+              "and are later committed as the resume PC):")
+        print(f"  {'signal':<40s} {'changes':>7s} {'->text':>7s} "
+              f"{'resumed':>8s} {'@disc':>6s}")
+        ranked = sorted(epc_checks,
+                        key=lambda c: (c.resumed, c.text_hits, -c.expired),
+                        reverse=True)
+        for c in ranked:
+            if c.changes == 0:
+                row = f"  {c.name:<40s} {'0 (constant -- not an epc)':>7s}"
+            else:
+                row = (f"  {c.name:<40s} {c.changes:>7d} "
+                       f"{100 * c.text_hits // c.changes:>6d}% "
+                       f"{c.resumed:>4d}/{c.changes:<3d} "
+                       f"{100 * c.disc_aligned // c.changes:>5d}%")
+            print(row)
+        best = ranked[0]
+        if best.changes and best.resumed:
+            q = best.resumed / best.changes
+            verdict = ("strong" if q > 0.9 and best.text_hits == best.changes
+                       else "plausible" if q > 0.5 else "weak")
+            print(f"  => {verdict} match: --epc {best.name}"
+                  + ("" if q > 0.9 else
+                     "  (unresumed changes: nested traps at trace end, "
+                     "context switches, or not actually an epc)"))
+        else:
+            print("  => no candidate behaves like an exception PC over "
+                  "this window; either no trap fired (try a longer "
+                  "--check-limit) or mepc is not in the dump")
     if pcs and clks:
         epc_hint = f"--epc {res.epc_candidates[0].name} " \
             if res.epc_candidates else ""
@@ -312,6 +370,19 @@ def main(argv=None) -> int:
     ps.add_argument("--explain", default=None, metavar="SIGNAL",
                     help="show the full scoring breakdown for one signal "
                          "(exact name, suffix, or substring)")
+    ps.add_argument("--check-epc", nargs="?", const=True, default=None,
+                    metavar="EXTRA_SIGNALS",
+                    help="validate epc candidates BEHAVIORALLY against the "
+                         "PC stream (value changes land in .text, coincide "
+                         "with PC discontinuities, and later commit as the "
+                         "resume PC). Optionally pass comma-separated extra "
+                         "signal names to test, e.g. CSR-array elements "
+                         "that name ranking cannot find")
+    ps.add_argument("--pc", default=None,
+                    help="PC signal for --check-epc (default: the top "
+                         "scan candidate)")
+    ps.add_argument("--check-limit", type=int, default=500000,
+                    help="commits to examine in --check-epc (default 500k)")
     ps.set_defaults(func=cmd_scan)
 
     pl = sub.add_parser("signals",
