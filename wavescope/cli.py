@@ -334,6 +334,25 @@ def cmd_profile(args) -> int:
     if prof.healed_returns or prof.unmatched_returns:
         print(f"[wavescope] returns: {prof.healed_returns} healed, "
               f"{prof.unmatched_returns} unmatched", file=sys.stderr)
+    if args.check_inclusive:
+        from .profiler import inclusive_consistency
+        rows, roots = inclusive_consistency(prof, binary)
+        print("[wavescope] inclusive consistency "
+              "(incoming arcs vs self+outgoing; nonzero delta = the "
+              "function's frame was cut early or entered untracked):",
+              file=sys.stderr)
+        for r in rows:
+            flag = " [recursive: expected]" if r["recursive"] else ""
+            print(f"[wavescope]   {r['name']}: in Cy={r['in_cy']} vs "
+                  f"self+out={r['expect_cy']} (d={r['d_cy']:+d}); "
+                  f"Ir d={r['d_ir']:+d}; calls_in={r['calls_in']}{flag}",
+                  file=sys.stderr)
+        if not rows:
+            print("[wavescope]   all tracked functions consistent",
+                  file=sys.stderr)
+        print("[wavescope]   roots (no incoming arcs): "
+              + ", ".join(f"{n} (Ir={i}, Cy={c})" for n, i, c in roots),
+              file=sys.stderr)
     if prof.drained_frames:
         print(f"[wavescope] {prof.drained_frames} frames alive at end of "
               f"trace; top by accumulated Ir:", file=sys.stderr)
@@ -456,6 +475,11 @@ def main(argv=None) -> int:
     pp.add_argument("--no-demangle", action="store_true",
                     help="keep mangled C++/Rust symbol names "
                          "(default: demangle via objdump -C)")
+    pp.add_argument("--check-inclusive", action="store_true",
+                    help="report functions whose incoming-arc inclusive "
+                         "differs from self + outgoing-arc inclusive "
+                         "(diagnoses inclusive drift; recursive functions "
+                         "flagged, roots listed separately)")
     pp.add_argument("--clock-counter", action="store_true", default=None,
                     help="treat --clock as a multi-bit CYCLE COUNTER "
                          "(C++ IP-simulator dumps: the clock recorded as "

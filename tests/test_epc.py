@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from wavescope.classify import get_classifier
 from wavescope.disasm import BinaryInfo, Func, Insn
-from wavescope.profiler import E_BCM, E_CY, E_IR, run
+from wavescope.profiler import E_CY, E_IR, run
 from wavescope.vcd_reader import changes_to_ticks, iter_commit_changes
 
 
@@ -115,10 +115,12 @@ class TestEpcBranchDeferral(unittest.TestCase):
         (5, 0x1014, 0x1010),
     ]
 
-    def test_bcm_charged_from_true_landing(self):
+    def test_taken_judged_from_true_landing(self):
         prof = run(iter(self.TRACE), B(), CL)
         self.assertEqual(prof.exceptions, 1)
-        self.assertEqual(prof.self_cost[0x1008][E_BCM], 1)
+        # deferred judgement lands in the jcnd arc map (Bcm was removed
+        # from the event columns for simulator diff parity)
+        self.assertEqual(prof.cond_jumps[(0x1008, 0x1010)], 1)
 
     def test_bcm_not_charged_when_fallthrough(self):
         trace = [
@@ -131,7 +133,7 @@ class TestEpcBranchDeferral(unittest.TestCase):
         ]
         prof = run(iter(trace), B(), CL)
         self.assertEqual(prof.exceptions, 1)
-        self.assertEqual(prof.self_cost[0x1008][E_BCM], 0)
+        self.assertNotIn((0x1008, 0x1010), prof.cond_jumps)
 
 
 class TestEpcNested(unittest.TestCase):

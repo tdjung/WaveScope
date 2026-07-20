@@ -28,7 +28,8 @@ instruction -- "the one that waited pays".  Equivalent to the simulator's
 Call arcs are keyed purely by (call_pc, callee_pc), matching the
 simulator's `calls[caller_pc][callee_pc]` map.
 
-Events: Ir Cy Bc Bcm Bi Bim Dr Dw.  Calls and tail calls are tracked
+Events: Ir Dr Dw Bc Bi Bim Cy (simulator diff order; Bcm dropped --
+taken counts live in the jcnd= arcs).  Calls and tail calls are tracked
 structurally (frames / calls map), not as per-PC events; direct/indirect
 jump flow is tracked per (src, dst) arc for jcnd=/jump= output.
 
@@ -57,8 +58,9 @@ from typing import Dict, Iterable, List, Optional, Tuple
 from .classify import InsnClass
 from .disasm import BinaryInfo, direct_target
 
-EVENTS = ["Ir", "Cy", "Bc", "Bcm", "Bi", "Bim", "Dr", "Dw"]
-E_IR, E_CY, E_BC, E_BCM, E_BI, E_BIM, E_DR, E_DW = range(len(EVENTS))
+# Order matches the user's simulator output for line-level diffing.
+EVENTS = ["Ir", "Dr", "Dw", "Bc", "Bi", "Bim", "Cy"]
+E_IR, E_DR, E_DW, E_BC, E_BI, E_BIM, E_CY = range(len(EVENTS))
 N_EVENTS = len(EVENTS)
 
 XRET_MNEMONICS = {"mret", "sret", "uret", "eret"}
@@ -273,12 +275,18 @@ def _unwind_to(prof: Profile, stack: List[FrameCtx], depth: int,
 
 
 def _close_loop_if_reentry(prof: Profile, stack: List[FrameCtx],
-                           entry: int) -> bool:
+                           entry: int, helpers=frozenset()) -> bool:
     """Loop closure: a transfer back to an entry whose TAIL frame is
     already on the stack (loop body crossing asm-label boundaries) must
     not push one frame per iteration -- each would accumulate all
     remaining iterations, inflating inclusive sums quadratically.
-    Flush the frames opened since that entry and reuse the original."""
+    Flush the frames opened since that entry and reuse the original.
+    Millicode helpers are exempt: __riscv_restore_* is legitimately
+    re-entered from everywhere, and a single stale helper frame would
+    otherwise trigger mass unwinds that cut every caller's inclusive
+    accumulation short."""
+    if entry in helpers:
+        return False
     lo = max(0, len(stack) - _LOOP_SCAN_DEPTH)
     for i in range(len(stack) - 1, lo - 1, -1):
         fr = stack[i]
@@ -361,6 +369,7 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
     # save/restore routines get special arc rules
     helper_funcs = {f for f in binary.funcs
                     if f.name.startswith(("__riscv_save", "__riscv_restore"))}
+    helper_starts = frozenset(f.start for f in helper_funcs)
     stack: List[FrameCtx] = []
     isr_ctxs: List[IsrCtx] = []
 
@@ -388,9 +397,6 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
             taken = cur_pc == p.target
         if p.exc:
             taken = False        # interrupted: landing is the handler
-
-        if cls.is_cond_branch and taken:
-            prof._update(p.pc, E_BCM, 1, stack)
 
         if prof.epc_mode and not p.exc:
             # entry consumed its pending, exit resolves with the true
@@ -435,6 +441,24 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
                     _unwind_to(prof, stack, j,
                                f"ret-match {p.insn.mnemonic}@0x{p.pc:x}")
                     return
+            # Simulator rule 2: a return-like transfer executing INSIDE
+            # a millicode helper (restore's ret, save's jr t0) always
+            # closes it -- unconditional top pop of helper frame(s).
+            # Without this, a restore frame pushed by
+            # `jal ra,__riscv_restore_0` from an UNTRACKED caller (trace
+            # start, post-ISR, post-drain) strands: its ret_addr (jal+4)
+            # never commits, so its 6-insn/14-cycle body -- and
+            # everything after -- stays out of the arc until the
+            # end-of-trace drain poisons it.
+            if cur_func is not None and cur_func in helper_funcs:
+                popped = False
+                while stack and stack[-1].callee_start is not None \
+                        and stack[-1].callee_start in helper_starts:
+                    _unwind_to(prof, stack, len(stack) - 1,
+                               "helper-ret-pop")
+                    popped = True
+                if popped:
+                    return
             if cls.is_return:
                 # Unmatched ret: heal like the simulator -- if we are
                 # returning INTO the function that called some stacked
@@ -476,7 +500,7 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
             if cur_func is not None and cur_func in helper_funcs:
                 return          # simulator: tail transfers FROM millicode
                                 # helpers (jr t0 chains etc.) are ignored
-            if _close_loop_if_reentry(prof, stack, cur_pc):
+            if _close_loop_if_reentry(prof, stack, cur_pc, helper_starts):
                 prof.calls[(p.pc, cur_pc)].count += 1
                 return
             if stack:
@@ -508,7 +532,7 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
         if cur_pc == p.fallthrough and callee_entry and diff_func:
             if cur_func is not None and cur_func in helper_funcs:
                 return
-            if _close_loop_if_reentry(prof, stack, cur_pc):
+            if _close_loop_if_reentry(prof, stack, cur_pc, helper_starts):
                 prof.calls[(p.pc, cur_pc)].count += 1
                 return
             _push_frame(prof, stack, isr_ctxs, FrameCtx(
@@ -751,3 +775,65 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
     if dbg is not None:
         dbg.close(prof)
     return prof
+
+
+def inclusive_consistency(prof: Profile, binary: BinaryInfo, top: int = 15):
+    """Per-function invariant check for diagnosing inclusive drift:
+
+        incoming arc inclusive  ==  self cost + outgoing arc inclusive
+
+    holds for every fully-tracked, non-root, non-recursive function.  A
+    caller-side arc smaller than the callee's own total (the reported
+    'AA: arc 497 vs self+outgoing 1094') means the callee's frame was
+    popped early or entered untracked -- this report ranks offenders.
+    Returns (rows, roots) where rows are dicts sorted by |Cy delta|;
+    recursive functions are flagged (the invariant legitimately differs).
+    """
+    self_tot: Dict[int, List[int]] = {}
+    for pc, ev in prof.self_cost.items():
+        f = binary.func_at(pc)
+        if f is None:
+            continue
+        acc = self_tot.setdefault(f.start, [0] * N_EVENTS)
+        for i in range(N_EVENTS):
+            acc[i] += ev[i]
+
+    inc_in: Dict[int, List[int]] = {}
+    inc_out: Dict[int, List[int]] = {}
+    n_in: Dict[int, int] = {}
+    recursive = set()
+    for (cp, callee), cs in prof.calls.items():
+        cf = binary.func_at(cp)
+        a = inc_in.setdefault(callee, [0] * N_EVENTS)
+        n_in[callee] = n_in.get(callee, 0) + cs.count
+        for i in range(N_EVENTS):
+            a[i] += cs.inclusive[i]
+        if cf is not None:
+            o = inc_out.setdefault(cf.start, [0] * N_EVENTS)
+            for i in range(N_EVENTS):
+                o[i] += cs.inclusive[i]
+            if cf.start == callee:
+                recursive.add(callee)
+
+    rows = []
+    roots = []
+    for fs in set(self_tot) | set(inc_in) | set(inc_out):
+        f = binary.func_at(fs)
+        name = f.name if f else hex(fs)
+        s = self_tot.get(fs, [0] * N_EVENTS)
+        ii = inc_in.get(fs, [0] * N_EVENTS)
+        oo = inc_out.get(fs, [0] * N_EVENTS)
+        expect = [s[i] + oo[i] for i in range(N_EVENTS)]
+        if n_in.get(fs, 0) == 0:
+            roots.append((name, expect[E_IR], expect[E_CY]))
+            continue
+        d_ir, d_cy = ii[E_IR] - expect[E_IR], ii[E_CY] - expect[E_CY]
+        if d_ir or d_cy:
+            rows.append({"name": name, "calls_in": n_in.get(fs, 0),
+                         "in_ir": ii[E_IR], "expect_ir": expect[E_IR],
+                         "in_cy": ii[E_CY], "expect_cy": expect[E_CY],
+                         "d_ir": d_ir, "d_cy": d_cy,
+                         "recursive": fs in recursive})
+    rows.sort(key=lambda r: -abs(r["d_cy"]))
+    roots.sort(key=lambda r: -r[2])
+    return rows[:top], roots[:5]

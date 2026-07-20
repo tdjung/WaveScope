@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from wavescope.classify import get_classifier
 from wavescope.disasm import BinaryInfo, Func, Insn
-from wavescope.profiler import E_BCM, E_CY, E_IR, run
+from wavescope.profiler import E_CY, E_IR, run
 
 CL = get_classifier("armv7m")
 
@@ -79,7 +79,7 @@ class TestLevelEntryExit(unittest.TestCase):
 
     def test_deferred_branch_true_landing(self):
         # bne resolved against 0x100a (taken), not the handler address
-        self.assertEqual(self.prof.self_cost[0x1004][E_BCM], 1)
+        self.assertEqual(self.prof.cond_jumps[(0x1004, 0x100a)], 1)
 
     def test_clamp_and_flow(self):
         self.assertEqual(self.prof.self_cost[0x3000][E_CY], 1)
@@ -96,7 +96,7 @@ class TestLevelEntryExit(unittest.TestCase):
             (5, 0x1008, 0),
         ]
         prof = lvl_run(trace)
-        self.assertEqual(prof.self_cost[0x1004][E_BCM], 0)
+        self.assertNotIn((0x1004, 0x100a), prof.cond_jumps)
         self.assertEqual(prof.exceptions, 1)
 
 
@@ -147,7 +147,7 @@ class TestLevelTailChain(unittest.TestCase):
         self.assertEqual(prof.exceptions, 2)
         self.assertEqual(prof.isr_open, 0)
         # thread-mode bne judged against the true landing after BOTH
-        self.assertEqual(prof.self_cost[0x1004][E_BCM], 1)
+        self.assertEqual(prof.cond_jumps[(0x1004, 0x100a)], 1)
         self.assertEqual(prof.flow_anomalies, 0)
 
 

@@ -62,14 +62,21 @@ def write(prof: Profile, out: TextIO, binary_path: str, cmd: str = "",
     if all_functions:
         emit_starts.update(f.start for f in b.funcs)
 
+    last_fl = None
     for fstart in sorted(emit_starts):
         pcs = sorted(by_func.get(fstart, []))
         first_pc = pcs[0] if pcs else fstart
         fl, _ = b.line_at(first_pc)
-        out.write(f"fl={fl}\n")
+        if fl != last_fl:
+            out.write(f"fl={fl}\n")     # simulator format: fl only on change
+            last_fl = fl
         out.write(f"fn={fname(fstart)}\n")
 
-        call_pcs = {cp: callee for cp, callee in calls_by_func.get(fstart, [])}
+        # a call SITE can have several callees (indirect jalr targets,
+        # per-target arcs); collapsing to one per pc dropped calls= lines
+        call_pcs: Dict[int, List[int]] = defaultdict(list)
+        for cp, callee in calls_by_func.get(fstart, []):
+            call_pcs[cp].append(callee)
 
         # Coverage emission: every instruction of the function appears,
         # executed ones with real costs and the rest at zero, so
@@ -116,14 +123,16 @@ def write(prof: Profile, out: TextIO, binary_path: str, cmd: str = "",
                         out.write(f"jump={n} 0x{dst:x} {dline}\n")
                     out.write(f"0x{pc:x} {line}\n")
             if pc in call_pcs:
-                _write_call(prof, out, b, pc, call_pcs.pop(pc))
+                for callee in sorted(call_pcs.pop(pc)):
+                    _write_call(prof, out, b, pc, callee)
 
         # call sites with no recorded self-cost line (shouldn't normally happen)
-        for pc, callee in sorted(call_pcs.items()):
-            _, line = b.line_at(pc)
-            zeros = " ".join("0" for _ in range(N_EVENTS))
-            out.write(f"0x{pc:x} {line} {zeros}\n")
-            _write_call(prof, out, b, pc, callee)
+        for pc, callees in sorted(call_pcs.items()):
+            for callee in sorted(callees):
+                _, line = b.line_at(pc)
+                zeros = " ".join("0" for _ in range(N_EVENTS))
+                out.write(f"0x{pc:x} {line} {zeros}\n")
+                _write_call(prof, out, b, pc, callee)
         out.write("\n")
 
     if orphans:

@@ -23,7 +23,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from wavescope.classify import get_classifier
 from wavescope.disasm import BinaryInfo, Func, Insn
-from wavescope.profiler import (E_BC, E_BCM, E_CY, E_DR, E_DW, E_IR,
+from wavescope.profiler import (E_BC, E_CY, E_DR, E_DW, E_IR,
                                 run)
 from wavescope.callgrind import write as write_callgrind
 from wavescope.vcd_reader import iter_pc_samples
@@ -125,7 +125,7 @@ class TestProfiler(unittest.TestCase):
     def test_branch(self):
         sc = self.prof.self_cost[0x100c]
         self.assertEqual(sc[E_BC], 1)
-        self.assertEqual(sc[E_BCM], 1)            # taken
+        # taken counts moved to the jcnd arc map (Bcm removed)
 
     def test_call_tracked(self):
         key = (0x1004, 0x2000)
@@ -143,7 +143,7 @@ class TestProfiler(unittest.TestCase):
         buf = io.StringIO()
         write_callgrind(self.prof, buf, "prog.elf")
         text = buf.getvalue()
-        self.assertIn("events: Ir Cy", text)
+        self.assertIn("events: Ir Dr Dw Bc Bi Bim Cy", text)
         self.assertIn("fn=main", text)
         self.assertIn("fn=func", text)
         self.assertIn("cfn=func", text)

@@ -150,7 +150,7 @@ class TestJumpCollection(unittest.TestCase):
         prof = run(iter(self.TRACE), b, CL)
         out = io.StringIO()
         write_callgrind(prof, out, "fw.elf")
-        self.assertIn("0x1010 0 0 0 0 0 0 0 0 0\n", out.getvalue())
+        self.assertIn("0x1010 0 0 0 0 0 0 0 0\n", out.getvalue())
         out2 = io.StringIO()
         write_callgrind(prof, out2, "fw.elf", all_functions=False)
         self.assertNotIn("0x1010 0 0", out2.getvalue())

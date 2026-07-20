@@ -238,7 +238,12 @@ instruction that eventually commits.
       interrupted instruction, so interrupted-branch judgement works the
       same as in `--epc` mode. Full-xPSR dumps are masked to the IPSR
       field automatically
-- [x] Callgrind output with call tree + inclusive costs
+- [x] Callgrind output with call tree + inclusive costs (event order
+      `Ir Dr Dw Bc Bi Bim Cy`, `fl=` emitted only on change -- both for
+      line-diffing against an existing profiler's output)
+- [x] `--check-inclusive`: per-function invariant report (incoming arc
+      inclusive vs self + outgoing) that pinpoints functions whose
+      frames were cut early or entered untracked
 - [x] Conditional/unconditional jump records (`jcnd=`/`jump=`), both
       branch directions (taken + fall-through) so per-direction counts
       sum to the execution count -- branch coverage

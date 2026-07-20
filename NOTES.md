@@ -1,7 +1,7 @@
 # WaveScope — Project Notes (대화 인수인계용)
 
 > 새 대화 시작 시: 이 파일과 README.md를 먼저 읽고 이어서 작업.
-> 마지막 업데이트: 2026-07-17, v0.14.0
+> 마지막 업데이트: 2026-07-17, v0.15.0
 
 ## 1. 프로젝트 개요
 
@@ -180,6 +180,7 @@ wavescope profile --wave all.vcd --elf fw.elf \
 | v0.8.0 | ★ --epc: mepc parsing 기반 정확한 ISR 진입/복귀 (update_epc 이식), profiler를 pending-resolution 파이프라인으로 재편 (인터럽트된 branch를 복귀 후 진짜 착지점으로 판정), WFI wake / 스퓨리어스 억제 / 중첩, multi-signal 추출 인프라 (VCD+fsdbreport), scan epc 후보, flow_anomalies 진단, fsdb2vcd clockless 경로 버그 수정 |
 | v0.9.0 | ★ millicode 수정: jr/c.jr/tail 등을 no_link_mnemonics로 분류 (jr t0 오분류 → __riscv_save inclusive 폭증 = 이슈 6.1 유력 원인 → 사용자 확인: "많이 좋아졌"으나 잔여 차이 있음). in-text 데이터 심볼 제외 (이슈 6.3 → 사용자 확인: 함수 개수 일치 = 해결). --debug-func/--debug-log. callgrind jcnd=/jump= |
 | v0.11.0 | ① clockless 적응형 period (→ v0.12.0에서 원복) ② scan --check-epc: epc 후보 행동 검증 (유지) |
+| v0.15.0 | 사용자 2차 디테일 리포트 대응: ① `jal ra,__riscv_restore_0`(link 있는 restore 진입!) 케이스 — caller frame이 미추적일 때 restore frame의 ret_addr(jal+4)가 영영 commit 안 돼 6 insn/14 Cy가 arc에 못 들어가고 drain까지 표류 → **helper 내 return류의 무조건 top-pop** (시뮬레이터 규칙 2 이식, ret과 jr t0 양쪽) ② _close_loop_if_reentry에서 helper 제외 (stale restore frame 1개가 대량 unwind을 유발해 caller들 inclusive를 조기 절단하는 것 방지 — "arc 497 vs callee 총합 1094" 증상의 유력 기전) ③ writer: 같은 call site 복수 callee(간접 jalr)가 dict 키 충돌로 calls= 라인 유실되던 버그 수정 ④ 출력 포맷 = 시뮬레이터 diff용: 이벤트 `Ir Dr Dw Bc Bi Bim Cy` (Bcm 제거 — taken은 jcnd arc에 유지), fl=은 변경 시에만 출력 ⑤ --check-inclusive: 함수별 "incoming arc 합 == self+outgoing 합" 불변식 검사 리포트 (조기 pop/미추적 진입 진단, 재귀 함수 표시, root 목록 — _start가 root 최상위인지 즉시 확인 가능) ⑥ end-of-trace drain이 _start inclusive에 전액 반영됨을 테스트로 고정 (이슈였다면 stale frame 절단이 원인이었을 것) |
 | v0.14.0 | ★★ inclusive 디테일 불일치 2대 원인 수정 (실물 riscv toolchain으로 검증): ① disasm 파서가 hex처럼 보이는 mnemonic("add"=0xadd!)을 인코딩 바이트로 삼켜 size 오염 (add가 size 3이 됨) → fallthrough 전부 어긋나 가짜 heuristic 예외·flow_anomaly·Bcm 오판·resume 불일치 유발. 탭 필드 구조 파싱으로 교체 (x86 byte-list/탭 없는 방언 fallback 포함) ② 빈 call stack에서 tail jump(`j __riscv_restore_0`)의 arc가 통째로 누락 — 시뮬레이터는 count를 push 시점에 무조건 기록 (`calls[..].count++` 후 frame만 조건부). count 기록을 push 시점으로 이동(parity), 빈 스택이면 count만 기록. ③ isCompilerHelper 이식: helper(__riscv_save/restore*)발 tail/fall-through arc 억제 — restore chain 내부(helper→helper) arc를 만들지 않아 시뮬레이터와 arc 구조 일치 (chain inclusive는 head arc에 귀속) ④ 회귀 테스트: gcc-riscv64-unknown-elf로 실제 -msave-restore ELF 빌드 (millicode 별칭·크기 겹침·`j save_4+0x4` 중간 진입 등 실물 레이아웃, toolchain 없으면 skip) |
 | v0.13.0 | multi-bit --clock 지원 (C++ IP simulator dump): ① 32/64-bit **cycle counter** clock — LSB 토글 방식 대신 **counter 값 자체를 tick으로** 사용 (사용자 아이디어의 상위호환: LSB rising edge는 2 cycle당 1회라 반토막 함정, LSB 토글 카운트는 sleep fast-forward의 counter 점프를 놓침; 값 방식은 점프/주파수 변화/wraparound까지 정확). commit 시에만 lazy int-parse + hold 샘플 미생성이라 1-bit edge 대비 속도 동급 (1M cycle 벤치: byte당 동일). VCD는 자동 감지 (width>1 + 값이 1 초과), --clock-counter로 강제 (FSDB 경로 필수). wraparound는 header width로 보정 ② wide 변수에 저장된 0/1 clock — 마지막 bit을 레벨로 edge 샘플링 (1-bit과 동일 동작) |
 | v0.12.0 | ① 적응형 원복: 고정 period + off-grid 감지 시 --clock 가이드 경고 (정책: CMU dump는 clock 필수) ② clocked/clockless 검증 테스트 (동등성 + clocked CMU 정확성) ③ ★ Cortex-M4/M35P 지원: --isr-level (IPSR 레벨 신호) — 진입=새 비0 레벨(선점/tail-chain 중첩), 복귀=외곽 레벨/0으로 하강(중간 ctx 일괄 pop, 최외곽 saved pending 복원 = HW EXC_RETURN이 정확히 원위치 복귀하므로 착지=resume, 주소 매칭 불필요), xPSR dump 시 0x1ff 자동 마스크, wfi wake는 IPSR이 항상 변하므로 별도 규칙 불필요 |
@@ -194,7 +195,11 @@ wavescope profile --wave all.vcd --elf fw.elf \
    보고 restore_0 call 누락). **사용자 상태: self Ir/Cy는 전반적으로
    일치 확인, inclusive만 잔여 불일치 → v0.14.0 재실행 결과 대기.**
    재검증 시 확인 포인트: restore_0 incoming call 수, heuristic/anomaly
-   수치 급감 여부, Bcm/jcnd 변화. ★ v0.9.0에서 유력 원인 수정:
+   수치 급감 여부, jcnd 변화. v0.15.0 이후 워크플로: ① 시뮬레이터
+   출력과 라인 diff (포맷 동일화됨) ② --check-inclusive로 불일치 함수
+   자동 추출 ③ 해당 함수 --debug-func 로그로 pop 사유 추적. 사용자
+   케이스 "AA arc 497 vs 총합 1094"는 AA frame이 중간에 잘렸다는 뜻 —
+   check-inclusive가 AA를 직접 지목해줌. ★ v0.9.0에서 유력 원인 수정:
    `jr t0`(millicode __riscv_save 복귀)가 operand 규약 탓에
    writes_link=True로 오분류 → return 매칭(273행 조건의 `not
    writes_link`)이 안 걸려 save frame이 안 닫히고 caller 본문 전체가

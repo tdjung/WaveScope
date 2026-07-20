@@ -9,7 +9,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from wavescope.classify import get_classifier
 from wavescope.disasm import BinaryInfo, Func, Insn, direct_target
-from wavescope.profiler import (E_BC, E_BCM, E_CY, E_IR, run)
+from wavescope.profiler import (E_BC, E_CY, E_IR, run)
 
 
 def B():
@@ -92,11 +92,9 @@ class TestTargetTaken(unittest.TestCase):
         prof = run(iter([(0, 0x4000), (1, 0x4010)]), b, cl)
         # 0x4010 not in insns -> unknown, but branch itself counted
         self.assertEqual(prof.self_cost[0x4000][E_BC], 1)
-        self.assertEqual(prof.self_cost[0x4000][E_BCM], 1)
         # not taken: next == fallthrough 0x4004
         prof2 = run(iter([(0, 0x4000), (1, 0x4004)]), b, cl)
         self.assertEqual(prof2.self_cost[0x4000][E_BC], 1)
-        self.assertEqual(prof2.self_cost[0x4000][E_BCM], 0)
 
     def test_trap_at_branch_boundary(self):
         """next is neither target nor fallthrough -> exception, not taken."""
@@ -104,7 +102,6 @@ class TestTargetTaken(unittest.TestCase):
         prof = run(iter([(0, 0x4000), (1, 0x9000)]), b,
                    get_classifier("riscv"))
         self.assertEqual(prof.exceptions, 1)
-        self.assertEqual(prof.self_cost[0x4000][E_BCM], 0)
 
     def test_trap_at_direct_jump_boundary(self):
         b = B()
