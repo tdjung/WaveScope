@@ -261,6 +261,37 @@ def cmd_profile(args) -> int:
                               clock_counter=args.clock_counter)
 
     samples = make_stream()
+    reader_timer = None
+    if args.timing:
+        import time as _time
+
+        class _Timed:
+            def __init__(self, it):
+                self.it = iter(it)
+                self.t = 0.0
+                self.n = 0
+                self.t0 = _time.perf_counter()
+
+            def __iter__(self):
+                return self
+
+            def __next__(self):
+                s = _time.perf_counter()
+                try:
+                    v = next(self.it)
+                except StopIteration:
+                    self.t += _time.perf_counter() - s
+                    raise
+                self.t += _time.perf_counter() - s
+                self.n += 1
+                if self.n % 2000000 == 0:
+                    el = _time.perf_counter() - self.t0
+                    print(f"[wavescope] ... {self.n} samples, "
+                          f"{el:.0f}s elapsed ({self.n / el:.0f}/s)",
+                          file=sys.stderr)
+                return v
+
+        samples = reader_timer = _Timed(samples)
 
     if args.engine != "legacy":
         if args.isr_level:
@@ -312,15 +343,19 @@ def cmd_profile(args) -> int:
               + f" -> {args.debug_log or 'stderr'}", file=sys.stderr)
 
     legacy_prof = None
+    import time as _t
+    _t_engine0 = _t.perf_counter()
     if args.engine == "legacy":
         prof = run(samples, binary, classifier,
                    clamp_exception_cycles=not args.no_isr_clamp,
-                   debug=debug, aux_mode=aux_mode, level_mask=level_mask)
+                   debug=debug, aux_mode=aux_mode, level_mask=level_mask,
+                   trace_roots=args.debug_roots)
     else:
         from .simcore import compare_profiles, run_sim
         print("[wavescope] engine: sim (literal transcription of "
               "docs/simulator_reference.md)", file=sys.stderr)
-        prof = run_sim(samples, binary, classifier)
+        prof = run_sim(samples, binary, classifier,
+                       trace_roots=args.debug_roots)
         if getattr(prof, "sim_dropped_unknown", 0):
             print(f"[wavescope] sim: {prof.sim_dropped_unknown} event "
                   f"charges dropped at pcs outside infos_ (reference "
@@ -332,7 +367,8 @@ def cmd_profile(args) -> int:
             prof2 = run(make_stream(), binary, classifier,
                         clamp_exception_cycles=not args.no_isr_clamp,
                         debug=debug, aux_mode=aux_mode,
-                        level_mask=level_mask)
+                        level_mask=level_mask,
+                        trace_roots=args.debug_roots)
             legacy_prof = prof2
             cmp = compare_profiles(prof, prof2, binary)
             print("[wavescope] sim vs legacy (sim - legacy):",
@@ -356,6 +392,42 @@ def cmd_profile(args) -> int:
         print(f"[wavescope] debug trace: {debug.events} events -> "
               f"{args.debug_log}", file=sys.stderr)
         dbg_out.close()
+
+    _t_engine = _t.perf_counter() - _t_engine0
+    if args.timing and reader_timer is not None:
+        rt, n = reader_timer.t, reader_timer.n
+        et = _t_engine - rt
+        print(f"[wavescope] timing: {n} samples | waveform reading "
+              f"{rt:.1f}s ({n / max(rt, 1e-9):.0f}/s) | profiling engine "
+              f"{et:.1f}s | total {_t_engine:.1f}s"
+              + (" (NOTE: --engine both runs a second full pass)"
+                 if args.engine == "both" else ""), file=sys.stderr)
+
+    def _print_roots(tag, plog):
+        if not plog or not plog["n"]:
+            if args.debug_roots:
+                print(f"[wavescope] root-frame events ({tag}): none",
+                      file=sys.stderr)
+            return
+        print(f"[wavescope] root-frame events ({tag}): "
+              + ", ".join(f"{k}={v}" for k, v in sorted(plog["n"].items())),
+              file=sys.stderr)
+        def loc(a):
+            if a is None:
+                return "?"
+            f = binary.func_at(a)
+            return f"{f.name}(0x{a:x})" if f else hex(a)
+        for tick, kind, cp, callee, info, depth, cy in plog["ev"]:
+            cys = f" frameCy={cy}" if cy is not None else ""
+            print(f"[wavescope]   t={tick} {kind:<12s} depth={depth} "
+                  f"{loc(cp)} -> {loc(callee)} [{info}]{cys}",
+                  file=sys.stderr)
+
+    if args.debug_roots:
+        _print_roots(args.engine if args.engine != "both" else "sim",
+                     getattr(prof, "root_log", None))
+        if legacy_prof is not None:
+            _print_roots("legacy", getattr(legacy_prof, "root_log", None))
 
     if isr_sig and not prof.epc_mode:
         print(f"[wavescope] WARNING: {'--epc' if args.epc else '--isr-level'}"
@@ -454,6 +526,46 @@ def cmd_profile(args) -> int:
     return 0
 
 
+def cmd_checkelf(args) -> int:
+    from .disasm import check_disasm
+    r = check_disasm(args.elf, args.toolchain_prefix,
+                     demangle=not args.no_demangle)
+    print(f"[checkelf] objdump raw insn lines: {r['n_raw']}, parsed: "
+          f"{r['n_parsed']}, funcs: {r['n_funcs']}, in-text data syms "
+          f"excluded: {r['n_data_syms']}")
+    ok = True
+    if r["n_parse_missing"]:
+        ok = False
+        print(f"[checkelf] {r['n_parse_missing']} lines FAILED TO PARSE "
+              f"(dialect issue) -- raw lines:")
+        for a, line in r["parse_missing"]:
+            print(f"  {line}")
+    if r["n_range_dropped"]:
+        ok = False
+        print(f"[checkelf] {r['n_range_dropped']} parsed insns fall in NO "
+              f"function range (would be missing from the full-coverage "
+              f"output):")
+        for a, mnem, ctx in r["range_dropped"]:
+            print(f"  {a:#x} {mnem}  ({ctx})")
+    if r["n_gaps"]:
+        ok = False
+        print(f"[checkelf] {r['n_gaps']} size-tiling gaps (addr+size != "
+              f"next addr; wrong instruction sizes):")
+        for name, a, sz, nxt in r["gaps"]:
+            print(f"  {name}: {a:#x}+{sz} != {nxt:#x}")
+    if r["n_end_mismatch"]:
+        print(f"[checkelf] {r['n_end_mismatch']} functions whose recorded "
+              f"end differs from last-insn end (symtab size vs "
+              f"disassembly):")
+        for name, s, e, last, sz in r["end_mismatch"]:
+            print(f"  {name} [{s:#x},{e:#x}) last {last:#x}+{sz} -> "
+                  f"{last + sz:#x}")
+    if ok and not r["n_end_mismatch"]:
+        print("[checkelf] clean: every objdump line parsed, every insn "
+              "covered by exactly its function, sizes tile perfectly")
+    return 0 if ok else 1
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(
         prog="wavescope",
@@ -491,6 +603,16 @@ def main(argv=None) -> int:
     ps.add_argument("--check-limit", type=int, default=500000,
                     help="commits to examine in --check-epc (default 500k)")
     ps.set_defaults(func=cmd_scan)
+
+    pe = sub.add_parser("checkelf",
+                        help="diagnose disassembly parsing / function "
+                             "ranges on this machine's objdump (finds "
+                             "missing assembly lines and reports the "
+                             "offending raw lines)")
+    pe.add_argument("--elf", required=True)
+    pe.add_argument("--toolchain-prefix", default="")
+    pe.add_argument("--no-demangle", action="store_true")
+    pe.set_defaults(func=cmd_checkelf)
 
     pl = sub.add_parser("signals",
                         help="list every signal parsed from the waveform")
@@ -539,6 +661,16 @@ def main(argv=None) -> int:
     pp.add_argument("--no-demangle", action="store_true",
                     help="keep mangled C++/Rust symbol names "
                          "(default: demangle via objdump -C)")
+    pp.add_argument("--timing", action="store_true",
+                    help="report where time goes: waveform reading vs "
+                         "profiling engine (adds ~100ns/sample overhead) "
+                         "with a progress heartbeat every 2M samples")
+    pp.add_argument("--debug-roots", action="store_true",
+                    help="log push/pop events of the BOTTOM call-stack "
+                         "frames (depth<=3) with reasons -- diagnoses "
+                         "root functions (_start & friends) whose "
+                         "inclusive comes out too small (early pops, "
+                         "empty-stack tail transfers)")
     pp.add_argument("--engine", choices=("legacy", "sim", "both"),
                     default="legacy",
                     help="profiling engine: 'legacy' (WaveScope's "

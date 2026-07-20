@@ -115,7 +115,9 @@ def write(prof: Profile, out: TextIO, binary_path: str, cmd: str = "",
             specs = jumps_by_src.get(pc)
             if specs:
                 total = sum(n for kind, _, n in specs if kind == "jcnd")
-                for kind, dst, n in sorted(specs, key=lambda x: -x[2]):
+                # ascending count order (matches the simulator output:
+                # jcnd=9/27 before jcnd=18/27)
+                for kind, dst, n in sorted(specs, key=lambda x: (x[2], x[1])):
                     _, dline = b.line_at(dst)
                     if kind == "jcnd":
                         out.write(f"jcnd={n}/{total or n} 0x{dst:x} {dline}\n")

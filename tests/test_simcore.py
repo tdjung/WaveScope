@@ -187,6 +187,39 @@ class TestSimIsr(unittest.TestCase):
         self.assertEqual(prof.self_cost[0x7000][E_CY], 1)
 
 
+class TestSimEpcMidTraceDefinition(unittest.TestCase):
+    def test_x_to_value_after_start_is_first_trap(self):
+        # epc undefined at trace start, defined mid-trace: NOT a
+        # baseline -- it is the first trap (adapter A2 scope)
+        tr = [(0, 0x2000), (1, 0x2004),
+              (2, 0x7000, 0x2008), (3, 0x7004, 0x2008),
+              (4, 0x2008, 0x2008)]
+        prof = run_sim(iter(tr), milli_binary(), CL)
+        self.assertEqual(prof.exceptions, 1)
+
+    def test_defined_at_first_commit_is_baseline(self):
+        tr = [(0, 0x2000, 0x7000), (1, 0x2004, 0x7000),
+              (2, 0x2008, 0x7000)]
+        prof = run_sim(iter(tr), milli_binary(), CL)
+        self.assertEqual(prof.exceptions, 0)
+
+
+class TestSimRootLog(unittest.TestCase):
+    def test_empty_stack_tail_recorded(self):
+        tr = [(0, 0x1008), (1, 0x100c)] + \
+             [(2 + i, pc) for i, pc in enumerate(REST)]
+        prof = run_sim(iter(tr), milli_binary(), CL, trace_roots=True)
+        kinds = [e[1] for e in prof.root_log["ev"]]
+        self.assertIn("tail-noframe", kinds)
+
+    def test_push_pop_events(self):
+        prof = run_sim(iter(full_trace()), milli_binary(), CL,
+                       trace_roots=True)
+        kinds = prof.root_log["n"]
+        self.assertGreater(kinds.get("push", 0), 0)
+        self.assertGreater(kinds.get("pop", 0), 0)
+
+
 class TestSimEmptyStackTail(unittest.TestCase):
     def test_count_without_frame(self):
         tr = [(0, 0x1008), (1, 0x100c)] + \

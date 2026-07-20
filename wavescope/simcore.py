@@ -162,9 +162,20 @@ class SimProfiler(object):
         self.enabled_ = True
 
         # diagnostics for the CLI (not part of the transcription)
+        self.root_log = None
+        self.cur_tick = None
         self.n_isr_entries = 0
         self.n_spurious = 0
         self.dropped_unknown_pc = 0
+
+    def _root(self, kind, cp, callee, info, depth):
+        log = self.root_log
+        if log is None:
+            return
+        log["n"][kind] = log["n"].get(kind, 0) + 1
+        if len(log["ev"]) < 40:
+            log["ev"].append((self.cur_tick, kind, cp, callee, info,
+                              depth, None))
 
     # -- QUIRK Q1: infos_[pc] with std::map operator[] semantics -------
     def _infos_bracket(self, pc: int) -> SimInfo:
@@ -359,6 +370,8 @@ class SimProfiler(object):
             entry.is_tail_call = False
             entry.events_at_entry = list(self.accumulated_events)
             self.call_stack.append(entry)
+            self._root("push", self.last_pc, cur_pc, "CALL",
+                       len(self.call_stack))
 
             self.calls[self.last_pc][cur_pc].count += 1
 
@@ -370,7 +383,13 @@ class SimProfiler(object):
             if isCompilerHelper(from_type):
                 return
             self.calls[self.last_pc][cur_pc].count += 1
+            if not self.call_stack:
+                self._root("tail-noframe", self.last_pc, cur_pc,
+                           "empty stack: count only, NO inclusive "
+                           "(reference semantics)", 0)
             if self.call_stack:
+                self._root("push", self.last_pc, cur_pc, "TAIL",
+                           len(self.call_stack) + 1)
                 tail_entry = CallStackEntry()
                 tail_entry.caller_pc = self.last_pc
                 tail_entry.callee_pc = cur_pc
@@ -382,6 +401,11 @@ class SimProfiler(object):
 
         elif self.branchType == BT_RETURN:
             if self.call_stack:
+                if len(self.call_stack) <= 3:
+                    top = self.call_stack[-1]
+                    self._root("pop", top.caller_pc, top.callee_pc,
+                               f"RETURN landing 0x{cur_pc:x}",
+                               len(self.call_stack))
                 entry = self.call_stack.pop()
                 call_info = self.calls[entry.caller_pc][entry.callee_pc]
                 for i in range(N_EVENTS):
@@ -442,17 +466,22 @@ class SimProfiler(object):
 
 def _update_profile(p: SimProfiler, binary: BinaryInfo, classifier,
                     pc: int, epc: Optional[int], cyc_delta: int,
-                    next_pc: Optional[int]) -> None:
+                    next_pc: Optional[int],
+                    static_cache: Dict[int, Tuple]) -> None:
     """One committed instruction, in the reference's exact call order."""
     if epc is not None:                       # ADAPTER A3
         p.update_epc(epc, pc)
     p.update(pc, TRACE_IR, 1)
     p.update(pc, TRACE_Cy_direct, cyc_delta)
 
-    insn = binary.insns.get(pc)
+    st = static_cache.get(pc)
+    if st is None:
+        insn = binary.insns.get(pc)
+        st = (insn, classifier.classify(insn) if insn else None)
+        static_cache[pc] = st
+    insn, cls = st
     if insn is None:
         return
-    cls = classifier.classify(insn)
 
     if cls.is_cond_branch:                    # Group::BRANCH
         p.update(pc, TRACE_Bc, 1)
@@ -473,13 +502,15 @@ def _update_profile(p: SimProfiler, binary: BinaryInfo, classifier,
 
 
 def run_sim(pc_stream, binary: BinaryInfo, classifier,
-            clamp_exception_cycles: bool = True) -> Profile:
+            trace_roots: bool = False) -> Profile:
     """Run the transcribed engine over (tick, pc[, epc]) samples and
-    return a legacy-shaped Profile for the shared callgrind writer."""
+    return a legacy-shaped Profile for the shared callgrind writer.
+    (--no-isr-clamp is not supported: the reference has no such switch.)
+    """
     p = SimProfiler(binary)
-    if not clamp_exception_cycles:
-        # reference has no such switch; emulate by never clamping
-        p.first_isr_cycle = False
+    static_cache: Dict[int, Tuple] = {}
+    if trace_roots:
+        p.root_log = {"n": {}, "ev": []}
 
     prev: Optional[Tuple] = None              # (pc, epc, cyc_delta)
     prev_tick: Optional[int] = None
@@ -487,37 +518,42 @@ def run_sim(pc_stream, binary: BinaryInfo, classifier,
     epc_seen = False
     n = 0
 
-    def feed(sample, next_pc):
-        pc, epc, delta = sample
-        _update_profile(p, binary, classifier, pc, epc, delta, next_pc)
-        if not clamp_exception_cycles:
-            p.first_isr_cycle = False
-
     for sample in pc_stream:
         tick, pc = sample[0], sample[1]
         epc = sample[2] if len(sample) > 2 else None
         if pc == prev_pc:
-            prev_tick = prev_tick if prev_tick is not None else tick
             continue                          # hold: same commit
         if epc is not None and not epc_seen:
-            p.prev_epc = epc                  # ADAPTER A2 baseline
             epc_seen = True
+            if n == 0:
+                # ADAPTER A2: defined at the very first commit ->
+                # baseline (ISS starts with prev_epc == mepc); defined
+                # LATER (x -> value) -> first trap, so keep prev_epc=0
+                # and let update_epc fire
+                p.prev_epc = epc
         delta = 1 if prev_tick is None else max(1, tick - prev_tick)
         cur = (pc, epc, delta)
         if prev is not None:
-            feed(prev, pc)                    # one commit behind (A1)
+            if trace_roots:
+                p.cur_tick = prev_tick
+            _update_profile(p, binary, classifier,
+                            prev[0], prev[1], prev[2], pc,
+                            static_cache)                    # A1: one behind
         prev = cur
         prev_tick = tick
         prev_pc = pc
         n += 1
     if prev is not None:
-        feed(prev, None)
+        if trace_roots:
+            p.cur_tick = prev_tick
+        _update_profile(p, binary, classifier,
+                        prev[0], prev[1], prev[2], None, static_cache)
     p.remain_call_stack_process()
 
-    return _to_profile(p, binary, n)
+    return _to_profile(p, binary, epc_seen)
 
 
-def _to_profile(p: SimProfiler, binary: BinaryInfo, n_samples: int) -> Profile:
+def _to_profile(p: SimProfiler, binary: BinaryInfo, epc_seen: bool) -> Profile:
     prof = Profile(binary)
     for pc, info in p.infos_.items():
         if any(info.event):
@@ -539,12 +575,13 @@ def _to_profile(p: SimProfiler, binary: BinaryInfo, n_samples: int) -> Profile:
         for dst, cnt in m.items():
             prof.uncond_jumps[(src, dst)] = cnt
 
-    prof.epc_mode = p.n_isr_entries > 0 or p.prev_epc != 0
+    prof.epc_mode = epc_seen
     prof.isr_kind = "epc" if prof.epc_mode else None
     prof.exceptions = p.n_isr_entries
     prof.spurious_epc = p.n_spurious
     prof.isr_open = len(p.isr_stack)
     prof.sim_dropped_unknown = p.dropped_unknown_pc
+    prof.root_log = p.root_log
     return prof
 
 

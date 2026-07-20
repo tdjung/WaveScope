@@ -312,3 +312,77 @@ def text_ranges(elf_path: str, toolchain_prefix: str = "") -> List[Tuple[int, in
                 except ValueError:
                     pass
     return sorted(ranges)
+
+
+def check_disasm(elf_path: str, toolchain_prefix: str = "",
+                 demangle: bool = True, max_show: int = 20) -> dict:
+    """Diagnose disassembly-parsing / function-range drops on THIS
+    machine's objdump dialect (wavescope checkelf).
+
+    Re-runs objdump -d, extracts the ground-truth instruction address
+    set with a minimal matcher, and reports -- with the offending RAW
+    LINES -- every address that (a) failed to parse into insns, or
+    (b) parsed but is excluded from every function range (and would
+    therefore be missing from the full-coverage callgrind emission),
+    plus per-function tiling gaps and end-vs-last-insn mismatches.
+    """
+    b = load_binary(elf_path, toolchain_prefix, with_lines=False,
+                    demangle=demangle)
+    objdump = _tool(toolchain_prefix, "objdump")
+    dm = ["-C"] if demangle else []
+    out = subprocess.run([objdump, "-d", *dm, elf_path],
+                         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                         universal_newlines=True, check=True)
+    addr_re = re.compile(r"^\s*([0-9a-fA-F]+):")
+    raw_by_addr: Dict[int, str] = {}
+    for line in out.stdout.splitlines():
+        if _LABEL_RE.match(line):
+            continue
+        m = addr_re.match(line)
+        if m:
+            a = int(m.group(1), 16)
+            raw_by_addr.setdefault(a, line)
+
+    parse_missing = sorted(a for a in raw_by_addr if a not in b.insns)
+    covered = set()
+    for f in b.funcs:
+        for a in b.insns:
+            if f.start <= a < f.end:
+                covered.add(a)
+    range_dropped = sorted(a for a in b.insns if a not in covered)
+
+    gaps = []
+    end_mismatch = []
+    for f in b.funcs:
+        pcs = sorted(a for a in b.insns if f.start <= a < f.end)
+        for a, nxt in zip(pcs, pcs[1:]):
+            if a + b.insns[a].size != nxt:
+                gaps.append((f.name, a, b.insns[a].size, nxt))
+        if pcs:
+            last = pcs[-1]
+            true_end = last + b.insns[last].size
+            nxt_start = min((g.start for g in b.funcs
+                             if g.start > f.start), default=None)
+            if true_end != f.end and (nxt_start is None
+                                      or true_end <= nxt_start):
+                end_mismatch.append((f.name, f.start, f.end, last,
+                                     b.insns[last].size))
+
+    return {
+        "n_raw": len(raw_by_addr), "n_parsed": len(b.insns),
+        "n_funcs": len(b.funcs), "n_data_syms": len(b.data_syms),
+        "parse_missing": [(a, raw_by_addr[a])
+                          for a in parse_missing[:max_show]],
+        "n_parse_missing": len(parse_missing),
+        "range_dropped": [
+            (a, b.insns[a].mnemonic,
+             (lambda f: f"prev func {f.name} ends {f.end:#x}"
+              if f else "no containing func")(
+                 max((g for g in b.funcs if g.start <= a),
+                     key=lambda g: g.start, default=None)))
+            for a in range_dropped[:max_show]],
+        "n_range_dropped": len(range_dropped),
+        "gaps": gaps[:max_show], "n_gaps": len(gaps),
+        "end_mismatch": end_mismatch[:max_show],
+        "n_end_mismatch": len(end_mismatch),
+    }

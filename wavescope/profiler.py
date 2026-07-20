@@ -62,6 +62,7 @@ from .disasm import BinaryInfo, direct_target
 EVENTS = ["Ir", "Dr", "Dw", "Bc", "Bi", "Bim", "Cy"]
 E_IR, E_DR, E_DW, E_BC, E_BI, E_BIM, E_CY = range(len(EVENTS))
 N_EVENTS = len(EVENTS)
+_MISS = object()
 
 XRET_MNEMONICS = {"mret", "sret", "uret", "eret"}
 WFI_MNEMONICS = {"wfi", "wfe"}
@@ -128,6 +129,8 @@ class Profile:
         self.cond_jumps: Dict[Tuple[int, int], int] = defaultdict(int)    # (src,dst) -> landings (incl. fall-through)
         self.uncond_jumps: Dict[Tuple[int, int], int] = defaultdict(int)  # (src,dst) -> count
         self.debug = None            # optional DebugTrace
+        self.root_log = None         # --debug-roots: bottom-frame events
+        self.cur_tick = None
         self.unknown_pcs = 0
         self.exceptions = 0
         self.healed_returns = 0
@@ -249,6 +252,13 @@ class DebugTrace(object):
               f"[dbg]   TOTAL incoming: n={inc_n} Ir={inc_ir} Cy={inc_cy}\n")
 
 
+def _root_ev(prof, kind, cp, callee, info, depth, cy=None):
+    log = prof.root_log
+    log["n"][kind] = log["n"].get(kind, 0) + 1
+    if len(log["ev"]) < 40:
+        log["ev"].append((prof.cur_tick, kind, cp, callee, info, depth, cy))
+
+
 def _flush_call(prof: Profile, stack: List[FrameCtx], idx: int,
                 why: str = "") -> None:
     fr = stack[idx]
@@ -263,6 +273,9 @@ def _flush_call(prof: Profile, stack: List[FrameCtx], idx: int,
     cs = prof.calls[(fr.call_pc, fr.callee_start)]
     for e in range(N_EVENTS):
         cs.inclusive[e] += fr.acc[e]
+    if prof.root_log is not None and idx <= 2:
+        _root_ev(prof, "pop", fr.call_pc, fr.callee_start, why, idx,
+                 fr.acc[E_CY])
     if prof.debug is not None:
         prof.debug.pop(fr, cs, idx, why)
 
@@ -309,6 +322,9 @@ def _push_frame(prof: Profile, stack: List[FrameCtx],
         for c in isr_ctxs:
             c.depth = max(0, c.depth - 1)
     stack.append(frame)
+    if prof.root_log is not None and len(stack) <= 3:
+        _root_ev(prof, "push", frame.call_pc, frame.callee_start,
+                 "TAIL" if frame.is_tail else "CALL", len(stack))
     if frame.call_pc is not None and frame.callee_start is not None:
         prof.calls[(frame.call_pc, frame.callee_start)].count += 1
     if prof.debug is not None:
@@ -342,7 +358,8 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
         clamp_exception_cycles: bool = True,
         debug: Optional[DebugTrace] = None,
         aux_mode: str = "epc",
-        level_mask: Optional[int] = None) -> Profile:
+        level_mask: Optional[int] = None,
+        trace_roots: bool = False) -> Profile:
     """Consume (tick, pc[, epc]) samples and build a Profile.
 
     Each new PC value is one committed instruction.  Its cycle cost is
@@ -365,6 +382,11 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
     """
     prof = Profile(binary)
     prof.debug = dbg = debug
+    static_cache: Dict[int, Tuple] = {}
+    fmap: Dict[int, object] = {}
+    entry_set = frozenset(f.start for f in binary.funcs)
+    if trace_roots:
+        prof.root_log = {"n": {}, "ev": []}
     # millicode helpers (simulator isCompilerHelper): -msave-restore
     # save/restore routines get special arc rules
     helper_funcs = {f for f in binary.funcs
@@ -409,8 +431,11 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
                     dbg.note(f"flow-anomaly {p.insn.mnemonic}@0x{p.pc:x} "
                              f"-> 0x{cur_pc:x} (unexplained discontinuity)")
 
-        cur_func = binary.func_at(p.pc)
-        callee_entry = binary.is_func_entry(cur_pc)
+        cur_func = fmap.get(p.pc, _MISS)
+        if cur_func is _MISS:
+            cur_func = binary.func_at(p.pc)
+            fmap[p.pc] = cur_func
+        callee_entry = cur_pc in entry_set
         diff_func = cur_func is None or not (cur_func.start <= cur_pc < cur_func.end)
 
         # --- intra-function control flow (callgrind jcnd=/jump= lines) -----
@@ -516,6 +541,9 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
                 # (empty stack: trace start, post-drain, post-ISR).
                 # This was the missing "j __riscv_restore_0" call.
                 prof.calls[(p.pc, cur_pc)].count += 1
+                if prof.root_log is not None:
+                    _root_ev(prof, "tail-noframe", p.pc, cur_pc,
+                             "empty stack: count only, NO inclusive", 0)
                 if prof.debug is not None:
                     prof.debug.note(
                         f"tail arc (no frame, empty stack) "
@@ -547,18 +575,23 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
         nonlocal pending, n_committed, epc_init, prev_epc, epc_suppressed
         nonlocal is_wfi, after_wfi, wfi_func
 
-        insn = binary.insns.get(pc)
-        # An unknown landing pc (outside the ELF text) still resolves the
-        # previous instruction and can mark an exception entry; only its
-        # OWN events are skipped.
-        cls: Optional[InsnClass] = None
-        target = None
-        fallthrough = pc
-        if insn is not None:
-            cls = classifier.classify(insn)
-            fallthrough = pc + insn.size
-            if (cls.is_cond_branch or cls.is_jump) and not cls.is_indirect:
-                target = direct_target(insn)
+        # static per-pc facts (insn, class, target, fallthrough) are
+        # memoized: classify/operand parsing per COMMIT was the hottest
+        # spot in the engine (they never change for a given pc)
+        st = static_cache.get(pc)
+        if st is None:
+            insn = binary.insns.get(pc)
+            cls = target = None
+            fallthrough = pc
+            if insn is not None:
+                cls = classifier.classify(insn)
+                fallthrough = pc + insn.size
+                if (cls.is_cond_branch or cls.is_jump) \
+                        and not cls.is_indirect:
+                    target = direct_target(insn)
+            st = (insn, cls, target, fallthrough)
+            static_cache[pc] = st
+        insn, cls, target, fallthrough = st
 
         # --- 1L. level-signal ISR entry/exit (Cortex-M IPSR) --------------
         entered = False
@@ -756,6 +789,8 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
         # arrival attribution: THIS instruction pays the gap since the
         # previous commit (floored at 1; local, never carried)
         cycles = 1 if prev_tick is None else max(1, tick - prev_tick)
+        if trace_roots:
+            prof.cur_tick = tick
         if dbg is not None:
             dbg.tick = tick
         step(pc, cycles, epc)

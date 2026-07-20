@@ -1,7 +1,7 @@
 # WaveScope — Project Notes (대화 인수인계용)
 
 > 새 대화 시작 시: 이 파일과 README.md를 먼저 읽고 이어서 작업.
-> 마지막 업데이트: 2026-07-18, v0.16.0
+> 마지막 업데이트: 2026-07-18, v0.17.0
 
 ## 1. 프로젝트 개요
 
@@ -277,6 +277,29 @@ isr-exit/stack-saturated — 이슈 6.1용), `isr enter/exit`(clamp 표시),
 `unmatched-ret`, `flow-anomaly`. 끝에 함수별 self 합계 + incoming arc
 전수(개수·inclusive)와 incl/self 비율 summary. 사용자에게 시뮬레이터
 로그와 같은 함수 구간을 나란히 받아 대조하는 워크플로 제안할 것.
+
+## 6d. v0.17.0 — 사용자 3차 리포트 대응 (sim/legacy 공통 inclusive 불일치)
+1. 속도: --timing (reader vs engine 분리 측정 + 2M 샘플마다 heartbeat).
+   실측 결과 병목은 reader가 아니라 **엔진** (3M 샘플: read 4~6s vs
+   engine 18~19s) → pc별 정적 사실(classify/direct_target/func_at/
+   entry) memoization으로 legacy 18.1→7.3s, sim 19.0→10.9s.
+   sim이 아직 느린 건 commit당 update() 함수호출 4~7회 오버헤드 —
+   추가 최적화 여지 있음. --engine both는 2-pass임을 사용자에게 상기.
+2. 함수 마지막 assembly line 소실: 이 컨테이너의 gcc-13 objdump로는
+   재현 불가 (-d/-dl 모두 118/118 완전 타일링) → 사용자 objdump 방언
+   의존. **wavescope checkelf --elf fw.elf** 신설: 그쪽 머신에서
+   파싱 실패 원문 라인 / 함수 범위에서 떨어진 insn / size 타일링 갭 /
+   end 불일치를 원문과 함께 출력 → 회신 받으면 방언 특정 가능.
+   재현 안 되면 사용자 dump 알고리즘 수신 예정.
+3. jcnd 출력 오름차순 (9/27 → 18/27) 완료.
+4. _start→SYS_BSP_reset inclusive 과소: --debug-roots 신설 (양 엔진,
+   depth≤3 frame push/pop을 tick·사유와 함께 최대 40건 + 종류별 계수;
+   빈 스택 tail은 "tail-noframe"으로 명시). ★ 핵심 가설: 그 진입이
+   j/tail이고 trace 시작 시 스택이 비면 **레퍼런스 자체가**
+   `if (!call_stack->empty())` 가드로 frame 없이 count만 기록 →
+   inclusive 0. 시뮬레이터도 같아야 하는데 사용자 쪽이 크게 나온다면
+   실제 코드가 레퍼런스와 다르거나(가드 없음?) 진입이 jal(CALL)임.
+   회신 요청: --debug-roots 출력 + _start의 해당 호출 assembly 1줄.
 
 ## 6c. sim 엔진 (v0.16.0에서 전사 완료 — wavescope/simcore.py)
 
