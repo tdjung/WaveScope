@@ -225,6 +225,12 @@ instruction that eventually commits.
       off-grid time deltas are detected and reported with explicit
       guidance to dump the core clock and use `--clock`, whose
       edge-counted cycles are exact under any frequency schedule
+- [x] Multi-bit `--clock` (C++ IP-simulator dumps): a 32/64-bit cycle
+      COUNTER is auto-detected and its value used directly as the cycle
+      index -- exact under counter jumps (sleep fast-forward),
+      frequency changes, and wraparound, at 1-bit edge-sampling speed;
+      a 0/1 clock stored in a wide variable edge-samples normally.
+      `--clock-counter` forces counter semantics (e.g. for FSDB)
 - [x] Cortex-M (M4 / M35P) exception tracking via `--isr-level <IPSR>`:
       these cores have no epc; the IPSR level signal drives entry
       (new nonzero level; preemption and tail-chaining nest) and exit

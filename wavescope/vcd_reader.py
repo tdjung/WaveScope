@@ -262,6 +262,21 @@ def iter_pc_samples(path: str, clock_name: str, pc_name: str,
                 ident = parts[1]
                 if ident in cur:
                     cur[ident] = parts[0][1:]
+                    if ident == clk_id:
+                        # 0/1 clock stored in a wide variable
+                        tok = parts[0][1:]
+                        v = "1" if tok.lstrip("0") == "1" else \
+                            ("0" if not tok.strip("0") else "x")
+                        edge = (prev_clk == "0" and v == "1") if want_rise \
+                            else (prev_clk == "1" and v == "0")
+                        if edge:
+                            if valid_id is None or \
+                                    cur.get(valid_id) == "1":
+                                pcv = _vec_to_int(cur.get(pc_id, "x"))
+                                if pcv is not None:
+                                    yield tick, pcv
+                            tick += 1
+                        prev_clk = v
             elif c0 in "rR":
                 # some ISS dumps emit integer-valued signals as reals
                 parts = line.split()
@@ -419,6 +434,23 @@ def iter_samples_multi(path: str, clock_name: str, pc_name: str,
                 continue
             if c0 in "01xXzZ" and line[1:] == clk_id:
                 v = c0.lower()
+                edge = (prev_clk == "0" and v == "1") if want_rise \
+                    else (prev_clk == "1" and v == "0")
+                if edge:
+                    if valid_id is None or cur_valid == 1:
+                        pcv = _vec_to_int(cur_pc or "x")
+                        if pcv is not None:
+                            yield (tick, pcv) + tuple(aux_cur)
+                    tick += 1
+                prev_clk = v
+                continue
+            if c0 in "bB" and line.endswith(clk_id) and \
+                    line.split()[1] == clk_id:
+                # 0/1 clock stored in a wide variable (C++ IP-simulator
+                # dumps): the value token is the level
+                tok = line.split()[0][1:]
+                v = "1" if tok.lstrip("0") == "1" else \
+                    ("0" if not tok.strip("0") else "x")
                 edge = (prev_clk == "0" and v == "1") if want_rise \
                     else (prev_clk == "1" and v == "0")
                 if edge:
@@ -611,3 +643,141 @@ def changes_to_ticks(changes: Iterator[Tuple],
                   f"--clock <signal>.", file=sys.stderr)
 
     return p, gen()
+
+def get_signal_width(path: str, name: str) -> int:
+    """Width (bits) of a signal from the VCD header only."""
+    with open_vcd_text(path) as f:
+        signals, _ = read_header(f)
+    return find_signal(signals, name).width
+
+
+def probe_signal_values(path: str, name: str, n: int = 16,
+                        max_lines: int = 200000) -> List[int]:
+    """First up-to-n defined integer values of a signal (cheap prefix
+    scan of the value section) -- used to distinguish a cycle COUNTER
+    (values grow past 1) from a 0/1 clock stored in a wide variable."""
+    out: List[int] = []
+    with open_vcd_text(path) as f:
+        signals, _ = read_header(f)
+        ident = find_signal(signals, name).ident
+        for i, raw in enumerate(f):
+            if i >= max_lines or len(out) >= n:
+                break
+            line = raw.strip()
+            if not line or line[0] in "#$":
+                continue
+            sid, v = _parse_value_line(line[0], line)
+            if sid == ident and v is not None:
+                out.append(v)
+    return out
+
+
+def iter_pc_samples_counter(path: str, clock_name: str, pc_name: str,
+                            valid_name: Optional[str] = None,
+                            aux_names: Tuple[str, ...] = (),
+                            ) -> Iterator[Tuple]:
+    """Clocked sampling for a cycle-COUNTER clock (C++ IP-simulator
+    dumps often record the clock as a 32/64-bit integer that increments
+    once per cycle instead of a toggling 1-bit wave).
+
+    Commit points are PC value changes (like the clockless reader); the
+    tick is the COUNTER VALUE in effect after all changes at the commit
+    timestamp (end-of-timestamp finalization, same as aux/epc).  This is
+    exact under counter jumps (sleep fast-forward) and clock-frequency
+    changes, handles 32-bit wraparound via the header width, and is at
+    least as fast as 1-bit edge sampling: the counter's value line is
+    stored as a raw string reference per cycle and int-parsed only once
+    per commit, and no hold samples are ever materialized.
+    """
+    with open_vcd_text(path) as f:
+        signals, _ = read_header(f)
+        clk = find_signal(signals, clock_name)
+        pc = find_signal(signals, pc_name)
+        valid = find_signal(signals, valid_name) if valid_name else None
+        aux = [find_signal(signals, n) for n in aux_names]
+
+        span = 1 << max(1, clk.width)
+        clk_id, pc_id = clk.ident, pc.ident
+        valid_id = valid.ident if valid else None
+        aux_idx: Dict[str, int] = {}
+        for i, s in enumerate(aux):
+            aux_idx[s.ident] = i
+        aux_cur: List[Optional[int]] = [None] * len(aux)
+
+        clk_raw: Optional[str] = None      # latest raw token, unparsed
+        prev_val: Optional[int] = None
+        wrapbase = 0
+        cur_pc: Optional[int] = None
+        cur_valid: Optional[int] = 1 if valid_id is None else None
+        pend: List[int] = []
+
+        def tick() -> Optional[int]:
+            nonlocal prev_val, wrapbase
+            if clk_raw is None:
+                return None
+            tok = clk_raw
+            if tok.strip("01"):            # x/z bits: undefined
+                return None
+            val = int(tok, 2)
+            if prev_val is not None and val < prev_val:
+                wrapbase += span           # counter wrapped
+            prev_val = val
+            return val + wrapbase
+
+        def flush() -> Iterator[Tuple]:
+            t = tick()
+            if t is not None:
+                snap = tuple(aux_cur)
+                for v in pend:
+                    yield (t, v) + snap
+            del pend[:]
+
+        for raw in f:
+            line = raw.strip()
+            if not line:
+                continue
+            c0 = line[0]
+            if c0 == "#":
+                if pend:
+                    for s in flush():
+                        yield s
+                continue
+            if c0 == "$":
+                continue
+            if c0 in "bB":
+                # hot path: manual split (one find, no list alloc)
+                sp = line.find(" ")
+                if sp < 0:
+                    sp = line.find("\t")
+                    if sp < 0:
+                        continue
+                ident = line[sp + 1:].strip()
+                if ident == clk_id:
+                    clk_raw = line[1:sp]       # store raw; parse at commit
+                    continue
+                if ident == pc_id:
+                    tok = line[1:sp]
+                    if not tok.strip("01"):
+                        cur_pc = int(tok, 2)
+                        if cur_valid == 1:
+                            pend.append(cur_pc)
+                    continue
+            ident2, v = _parse_value_line(c0, line)
+            if ident2 is None:
+                continue
+            if ident2 == pc_id:
+                if v is not None:
+                    cur_pc = v
+                    if cur_valid == 1:
+                        pend.append(v)
+            elif ident2 == clk_id:             # scalar-form counter line
+                clk_raw = line[0] if c0 in "01xXzZ" else None
+            elif ident2 in aux_idx:
+                aux_cur[aux_idx[ident2]] = v
+            elif valid_id is not None and ident2 == valid_id:
+                if v == 1 and cur_valid != 1 and cur_pc is not None:
+                    pend.append(cur_pc)
+                cur_valid = v
+        if pend:
+            for s in flush():
+                yield s

@@ -1,7 +1,7 @@
 # WaveScope — Project Notes (대화 인수인계용)
 
 > 새 대화 시작 시: 이 파일과 README.md를 먼저 읽고 이어서 작업.
-> 마지막 업데이트: 2026-07-16, v0.12.0
+> 마지막 업데이트: 2026-07-16, v0.13.0
 
 ## 1. 프로젝트 개요
 
@@ -180,6 +180,7 @@ wavescope profile --wave all.vcd --elf fw.elf \
 | v0.8.0 | ★ --epc: mepc parsing 기반 정확한 ISR 진입/복귀 (update_epc 이식), profiler를 pending-resolution 파이프라인으로 재편 (인터럽트된 branch를 복귀 후 진짜 착지점으로 판정), WFI wake / 스퓨리어스 억제 / 중첩, multi-signal 추출 인프라 (VCD+fsdbreport), scan epc 후보, flow_anomalies 진단, fsdb2vcd clockless 경로 버그 수정 |
 | v0.9.0 | ★ millicode 수정: jr/c.jr/tail 등을 no_link_mnemonics로 분류 (jr t0 오분류 → __riscv_save inclusive 폭증 = 이슈 6.1 유력 원인 → 사용자 확인: "많이 좋아졌"으나 잔여 차이 있음). in-text 데이터 심볼 제외 (이슈 6.3 → 사용자 확인: 함수 개수 일치 = 해결). --debug-func/--debug-log. callgrind jcnd=/jump= |
 | v0.11.0 | ① clockless 적응형 period (→ v0.12.0에서 원복) ② scan --check-epc: epc 후보 행동 검증 (유지) |
+| v0.13.0 | multi-bit --clock 지원 (C++ IP simulator dump): ① 32/64-bit **cycle counter** clock — LSB 토글 방식 대신 **counter 값 자체를 tick으로** 사용 (사용자 아이디어의 상위호환: LSB rising edge는 2 cycle당 1회라 반토막 함정, LSB 토글 카운트는 sleep fast-forward의 counter 점프를 놓침; 값 방식은 점프/주파수 변화/wraparound까지 정확). commit 시에만 lazy int-parse + hold 샘플 미생성이라 1-bit edge 대비 속도 동급 (1M cycle 벤치: byte당 동일). VCD는 자동 감지 (width>1 + 값이 1 초과), --clock-counter로 강제 (FSDB 경로 필수). wraparound는 header width로 보정 ② wide 변수에 저장된 0/1 clock — 마지막 bit을 레벨로 edge 샘플링 (1-bit과 동일 동작) |
 | v0.12.0 | ① 적응형 원복: 고정 period + off-grid 감지 시 --clock 가이드 경고 (정책: CMU dump는 clock 필수) ② clocked/clockless 검증 테스트 (동등성 + clocked CMU 정확성) ③ ★ Cortex-M4/M35P 지원: --isr-level (IPSR 레벨 신호) — 진입=새 비0 레벨(선점/tail-chain 중첩), 복귀=외곽 레벨/0으로 하강(중간 ctx 일괄 pop, 최외곽 saved pending 복원 = HW EXC_RETURN이 정확히 원위치 복귀하므로 착지=resume, 주소 매칭 불필요), xPSR dump 시 0x1ff 자동 마스크, wfi wake는 IPSR이 항상 변하므로 별도 규칙 불필요 |
 | v0.10.0 | 사용자 포맷 요구 반영: ① coverage 방출 — ELF code 영역 전체 insn을 zero-cost라도 표기 (미실행 code vs 컴파일 제외 code 구분용; --executed-only로 비활성) ② jump 라인 순서 = cost 라인 → jcnd/jump → position-only 라인(0xPC LINE) 반복 ③ cond branch 양방향 기록 (taken + fall-through, jcnd=30/100·70/100 합=실행수, 분모=방향 합) ④ IndJmp/DirJmp 이벤트 제거 (8개) |
 
@@ -234,6 +235,12 @@ wavescope profile --wave all.vcd --elf fw.elf \
    **edge 샘플링 의미론 주의**: edge N에서 같은 timestamp에 써진 값은
    edge N+1에서 샘플됨 (flop 타이밍상 올바름) — 합성 VCD는 마지막 pc
    write 뒤 trailing edge 필요, 실 dump는 자연 충족.
+5c. **C++ 모델 counter clock (v0.13.0)** — 사용자 환경이 RTL이 아닌 C++
+   IP simulator로 이동, clock을 32/64-bit 정수로 기록. counter 값 =
+   cycle index로 직접 사용 (iter_pc_samples_counter: clockless commit
+   추출과 동형, counter는 timestamp 끝 확정 + commit당 1회 파싱).
+   CMU 주파수 변화 문제도 이 경로에선 원천 소멸 (값이 곧 cycle).
+   --epc/--isr-level과 조합 가능 (aux 동반).
 6. ~~indirect jump 직후 인터럽트 감지 불가~~ → **v0.8.0에서 --epc로 해결**
    (mepc dump 필요 — 사용자에게 waveform에 mepc 추가 dump 요청해야 함).
    실 waveform 검증 대기. epc 모드의 flow_anomalies 수치가 크면

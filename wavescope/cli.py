@@ -255,7 +255,8 @@ def cmd_profile(args) -> int:
     samples = open_pc_stream(args.wave, args.clock, args.pc,
                              valid=args.valid, sample_edge=args.edge,
                              clock_period=args.clock_period,
-                             cfg=_wave_cfg(args), epc=isr_sig)
+                             cfg=_wave_cfg(args), epc=isr_sig,
+                             clock_counter=args.clock_counter)
     debug = None
     dbg_out = None
     if args.debug_func:
@@ -455,6 +456,14 @@ def main(argv=None) -> int:
     pp.add_argument("--no-demangle", action="store_true",
                     help="keep mangled C++/Rust symbol names "
                          "(default: demangle via objdump -C)")
+    pp.add_argument("--clock-counter", action="store_true", default=None,
+                    help="treat --clock as a multi-bit CYCLE COUNTER "
+                         "(C++ IP-simulator dumps: the clock recorded as "
+                         "a 32/64-bit incrementing integer) -- the "
+                         "counter value becomes the cycle index. "
+                         "Auto-detected for VCD (width > 1 bit and "
+                         "values past 1); this flag forces it, e.g. for "
+                         "FSDB input")
     pp.add_argument("--isr-level", metavar="SIGNAL",
                     help="Cortex-M (M4/M35P) exception tracking: the IPSR "
                          "signal (active exception number; 0 = thread "

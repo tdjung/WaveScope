@@ -10,7 +10,9 @@ from typing import Iterator, List, Optional, Tuple
 
 from . import fsdb as fsdb_mod
 from . import trn as trn_mod
-from .vcd_reader import (changes_to_ticks, get_timescale,
+from .vcd_reader import (changes_to_ticks, get_signal_width,
+                         get_timescale, iter_pc_samples_counter,
+                         probe_signal_values,
                          iter_commit_changes, iter_pc_changes,
                          iter_pc_samples, iter_samples_multi, parse_period)
 
@@ -78,6 +80,7 @@ def open_pc_stream(path: str, clock: Optional[str], pc: str,
                    clock_period: Optional[str] = None,
                    cfg: Optional[WaveConfig] = None,
                    epc: Optional[str] = None,
+                   clock_counter: Optional[bool] = None,
                    ) -> Iterator[Tuple]:
     """Yield (tick, pc) samples -- or (tick, pc, epc_value) when an epc
     signal name is given (epc rides along as the CSR value in effect at
@@ -88,6 +91,26 @@ def open_pc_stream(path: str, clock: Optional[str], pc: str,
         path = _trn_to_vcd(path, cfg)
     if not _is_fsdb(path):
         if clock:
+            # multi-bit clocks (C++ IP-simulator dumps): a cycle COUNTER
+            # (values grow past 1) uses its value as the tick; a 0/1
+            # clock merely stored in a wide variable edge-samples as
+            # usual.  --clock-counter forces counter semantics.
+            is_ctr = clock_counter
+            if is_ctr is None:
+                try:
+                    if get_signal_width(path, clock) > 1:
+                        vals = probe_signal_values(path, clock)
+                        is_ctr = bool(vals) and max(vals) > 1
+                except Exception:
+                    is_ctr = False
+            if is_ctr:
+                print(f"[wavescope] --clock {clock} is a multi-bit cycle "
+                      f"counter: using its VALUE as the cycle index "
+                      f"(exact under frequency changes, counter jumps, "
+                      f"and wraparound)", file=sys.stderr)
+                return iter_pc_samples_counter(path, clock, pc,
+                                               valid_name=valid,
+                                               aux_names=aux)
             if aux:
                 return iter_samples_multi(path, clock, pc, aux_names=aux,
                                           sample_edge=sample_edge,
@@ -116,6 +139,13 @@ def open_pc_stream(path: str, clock: Optional[str], pc: str,
         print(f"[wavescope] FSDB: extracting signals via fsdbreport "
               f"({tools.fsdbreport})", file=sys.stderr)
         if clock:
+            if clock_counter:
+                print(f"[wavescope] --clock {clock}: counter semantics "
+                      f"(--clock-counter) via fsdbreport", file=sys.stderr)
+                stream = fsdb_mod.iter_commit_changes_fsdbreport(
+                    path, tools.fsdbreport, pc, aux_names=(clock,) + aux,
+                    valid=valid, extra_args=cfg.fsdbreport_args)
+                return _counter_adapt(stream, len(aux))
             if aux:
                 return fsdb_mod.iter_samples_fsdbreport_multi(
                     path, tools.fsdbreport, clock, pc, aux_names=aux,
@@ -151,8 +181,28 @@ def open_pc_stream(path: str, clock: Optional[str], pc: str,
         # recurse on the converted VCD: same clocked/clockless dispatch
         return open_pc_stream(vcd, clock, pc, valid=valid,
                               sample_edge=sample_edge,
-                              clock_period=clock_period, cfg=cfg, epc=epc)
+                              clock_period=clock_period, cfg=cfg, epc=epc,
+                              clock_counter=clock_counter)
     raise fsdb_mod.FsdbError(_no_tools_msg(tools))
+
+
+def _counter_adapt(stream: Iterator[Tuple], n_aux: int) -> Iterator[Tuple]:
+    """Map (time, pc, counter, *aux) commit samples to (counter_tick,
+    pc, *aux); 32/64-bit wraparound is corrected with a width guess from
+    the first value's magnitude (fsdbreport gives no header width)."""
+    prev = None
+    wrapbase = 0
+    span = None
+    for s in stream:
+        ctr = s[2]
+        if ctr is None:
+            continue
+        if span is None:
+            span = 1 << (32 if ctr < (1 << 32) else 64)
+        if prev is not None and ctr < prev:
+            wrapbase += span
+        prev = ctr
+        yield (ctr + wrapbase, s[1]) + tuple(s[3:3 + n_aux])
 
 
 def prepare_for_scan(path: str, cfg: Optional[WaveConfig] = None) -> str:
