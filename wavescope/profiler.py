@@ -254,8 +254,11 @@ def _flush_call(prof: Profile, stack: List[FrameCtx], idx: int,
         if prof.debug is not None:
             prof.debug.pop(fr, None, idx, why)
         return
+    # arc COUNTS are recorded at push time (simulator parity: the
+    # simulator increments calls[..].count when the transfer happens,
+    # even when no frame is pushed); the pop only adds the frame's
+    # accumulated inclusive events
     cs = prof.calls[(fr.call_pc, fr.callee_start)]
-    cs.count += 1
     for e in range(N_EVENTS):
         cs.inclusive[e] += fr.acc[e]
     if prof.debug is not None:
@@ -298,6 +301,8 @@ def _push_frame(prof: Profile, stack: List[FrameCtx],
         for c in isr_ctxs:
             c.depth = max(0, c.depth - 1)
     stack.append(frame)
+    if frame.call_pc is not None and frame.callee_start is not None:
+        prof.calls[(frame.call_pc, frame.callee_start)].count += 1
     if prof.debug is not None:
         prof.debug.push(frame, len(stack))
 
@@ -352,6 +357,10 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
     """
     prof = Profile(binary)
     prof.debug = dbg = debug
+    # millicode helpers (simulator isCompilerHelper): -msave-restore
+    # save/restore routines get special arc rules
+    helper_funcs = {f for f in binary.funcs
+                    if f.name.startswith(("__riscv_save", "__riscv_restore"))}
     stack: List[FrameCtx] = []
     isr_ctxs: List[IsrCtx] = []
 
@@ -464,7 +473,11 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
 
         # --- tail calls -------------------------------------------------------
         if taken_transfer and not cls.writes_link and callee_entry and diff_func:
+            if cur_func is not None and cur_func in helper_funcs:
+                return          # simulator: tail transfers FROM millicode
+                                # helpers (jr t0 chains etc.) are ignored
             if _close_loop_if_reentry(prof, stack, cur_pc):
+                prof.calls[(p.pc, cur_pc)].count += 1
                 return
             if stack:
                 _push_frame(prof, stack, isr_ctxs, FrameCtx(
@@ -473,17 +486,30 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
                     call_pc=p.pc,
                     callee_start=cur_pc,
                     is_tail=True), max_stack)
+            else:
+                # simulator parity: the tail arc COUNT is unconditional
+                # even when there is no frame to carry inclusive costs
+                # (empty stack: trace start, post-drain, post-ISR).
+                # This was the missing "j __riscv_restore_0" call.
+                prof.calls[(p.pc, cur_pc)].count += 1
+                if prof.debug is not None:
+                    prof.debug.note(
+                        f"tail arc (no frame, empty stack) "
+                        f"0x{p.pc:x} -> 0x{cur_pc:x}")
             return
 
         # --- fall-through into another function --------------------------------
         # No jump executed, but the next PC is a different function's
-        # entry (millicode chains, cold/hot splits, asm). Model as an
-        # implicit tail transfer so the entered function receives a
-        # proper incoming arc; otherwise its self cost (every traversal)
-        # exceeds its incoming inclusive (direct entries only), breaking
-        # the leaf self == inclusive invariant. No jump event charged.
+        # entry (cold/hot splits, asm). Model as an implicit tail
+        # transfer so the entered function receives an incoming arc.
+        # Millicode chain crossings (helper -> helper fall-through,
+        # __riscv_restore_10 -> _4 -> _0) are EXCLUDED to match the
+        # simulator, which creates nothing for non-branch transitions.
         if cur_pc == p.fallthrough and callee_entry and diff_func:
+            if cur_func is not None and cur_func in helper_funcs:
+                return
             if _close_loop_if_reentry(prof, stack, cur_pc):
+                prof.calls[(p.pc, cur_pc)].count += 1
                 return
             _push_frame(prof, stack, isr_ctxs, FrameCtx(
                 func_start=cur_pc,

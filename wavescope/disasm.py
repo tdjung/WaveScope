@@ -57,7 +57,45 @@ class BinaryInfo(object):
 
 
 _DISASM_RE = re.compile(
-    r"^\s*([0-9a-fA-F]+):\s+((?:[0-9a-fA-F]{2,8}\s+)+)\s*(\S+)?\s*(.*)$")
+    r"^\s*([0-9a-fA-F]+):\s+((?:(?:[0-9a-fA-F]{2}){1,4}\s+)+)\s*(\S+)?\s*(.*)$")
+_ADDR_RE = re.compile(r"^\s*([0-9a-fA-F]+):(.*)$")
+
+
+def _parse_disasm_fields(line):
+    """(addr, enc_tokens, mnemonic, operands) from one objdump -d line.
+
+    GNU/LLVM objdump separate the fields with TABS:
+        ADDR:<tab>ENCODING<tab>MNEMONIC<tab>OPERANDS
+    (x86 puts mnemonic+operands in one space-separated tab field; the
+    encoding field itself may hold space-separated bytes).  Splitting on
+    whitespace alone is WRONG: hex-looking mnemonics ("add" = 0xadd!)
+    get consumed as encoding bytes, inflating the instruction size --
+    which corrupts every fallthrough computation (false unreachable-
+    successor exceptions, false flow anomalies, wrong taken/Bcm).
+    A tab-less dialect falls back to the regex, whose encoding tokens
+    are restricted to even lengths so 3-char mnemonics stay safe."""
+    m = _ADDR_RE.match(line)
+    if m is None or "\t" not in m.group(2):
+        m2 = _DISASM_RE.match(line)
+        if not m2:
+            return None
+        return (int(m2.group(1), 16), m2.group(2).split(),
+                (m2.group(3) or "").lower(), m2.group(4).strip())
+    parts = [p for p in m.group(2).split("\t")]
+    if parts and not parts[0].strip():
+        parts = parts[1:]
+    if not parts:
+        return None
+    enc_tokens = parts[0].split()
+    if not enc_tokens or any(c not in "0123456789abcdefABCDEF"
+                             for t in enc_tokens for c in t):
+        return None
+    rest = "\t".join(parts[1:]).strip()
+    if not rest:
+        return (int(m.group(1), 16), enc_tokens, "", "")
+    sp = rest.split(None, 1)
+    return (int(m.group(1), 16), enc_tokens, sp[0].lower(),
+            sp[1].strip() if len(sp) > 1 else "")
 _LABEL_RE = re.compile(r"^([0-9a-fA-F]+) <(.+)>:\s*$")
 _SYM_RE = re.compile(
     r"^([0-9a-fA-F]+)\s+([lgw!\s])([w\s])([C\s])([W\s])([Ii\s])([dD\s])([FfO\s])\s+(\S+)\s+([0-9a-fA-F]+)\s+(.*)$")
@@ -116,21 +154,19 @@ def load_binary(elf_path: str, toolchain_prefix: str = "",
         if lm:
             labels[int(lm.group(1), 16)] = strip_params(lm.group(2))
             continue
-        m = _DISASM_RE.match(line)
-        if not m:
+        m = _parse_disasm_fields(line)
+        if m is None:
             continue
-        addr = int(m.group(1), 16)
-        raw = m.group(2).split()
+        addr, raw, mnem, ops = m
         size = sum(len(b) // 2 for b in raw)
         try:
             encoding = int("".join(raw), 16)
         except ValueError:
             encoding = None
-        mnem = (m.group(3) or "").lower()
         if not mnem:
             continue
         info.insns[addr] = Insn(addr=addr, size=size, mnemonic=mnem,
-                                operands=m.group(4).strip(),
+                                operands=ops,
                                 encoding=encoding)
         addrs.append(addr)
 

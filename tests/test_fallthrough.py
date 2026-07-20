@@ -49,20 +49,24 @@ class TestFallThrough(unittest.TestCase):
     def setUp(self):
         self.prof = run(iter(TRACE), B(), get_classifier("riscv"))
 
-    def test_chain_arcs_exist(self):
-        self.assertIn((0x2004, 0x3000), self.prof.calls)  # tail
-        self.assertIn((0x3000, 0x3004), self.prof.calls)  # fall
-        self.assertIn((0x3004, 0x3008), self.prof.calls)  # fall
+    def test_direct_tail_arc_exists_chain_arcs_do_not(self):
+        # simulator parity (v0.14.0): millicode helper->helper
+        # transitions create NO arcs (isCompilerHelper suppression);
+        # only the non-helper tail into the chain gets an arc
+        self.assertIn((0x2004, 0x3000), self.prof.calls)
+        self.assertEqual(self.prof.calls[(0x2004, 0x3000)].count, 1)
+        self.assertNotIn((0x3000, 0x3004), self.prof.calls)
+        self.assertNotIn((0x3004, 0x3008), self.prof.calls)
 
-    def test_leaf_self_equals_incoming_inclusive(self):
-        """restore_0 is a leaf: its incoming arc inclusive == its self."""
-        arc = self.prof.calls[(0x3004, 0x3008)]
-        self_ir = (self.prof.self_cost[0x3008][E_IR]
-                   + self.prof.self_cost[0x300c][E_IR])
-        self_cy = (self.prof.self_cost[0x3008][E_CY]
-                   + self.prof.self_cost[0x300c][E_CY])
-        self.assertEqual(arc.inclusive[E_IR], self_ir)   # 2 == 2
-        self.assertEqual(arc.inclusive[E_CY], self_cy)
+    def test_chain_inclusive_lands_on_entry_arc(self):
+        """The whole chain's cost (restore_8+_4+_0 bodies) accrues to
+        the tail arc into the chain HEAD, like the simulator (the tail
+        frame stays open across helper fall-throughs)."""
+        arc = self.prof.calls[(0x2004, 0x3000)]
+        self.assertEqual(arc.inclusive[E_IR], 4)   # 3 lw + ret
+        # restore_0 has self cost but intentionally no incoming arc
+        # (matches the simulator; its callers are only direct tails)
+        self.assertEqual(self.prof.self_cost[0x3008][E_IR], 1)
 
     def test_chain_inclusive_nesting(self):
         """restore_8 arc covers _4 and _0; ret unwinds everything to A."""
