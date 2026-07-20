@@ -1,7 +1,7 @@
 # WaveScope — Project Notes (대화 인수인계용)
 
 > 새 대화 시작 시: 이 파일과 README.md를 먼저 읽고 이어서 작업.
-> 마지막 업데이트: 2026-07-16, v0.11.0
+> 마지막 업데이트: 2026-07-16, v0.12.0
 
 ## 1. 프로젝트 개요
 
@@ -179,7 +179,8 @@ wavescope profile --wave all.vcd --elf fw.elf \
 | v0.6.3–0.7.1 | 의존성 제로 / TRN 지원 / 라이선스 큐 대응 |
 | v0.8.0 | ★ --epc: mepc parsing 기반 정확한 ISR 진입/복귀 (update_epc 이식), profiler를 pending-resolution 파이프라인으로 재편 (인터럽트된 branch를 복귀 후 진짜 착지점으로 판정), WFI wake / 스퓨리어스 억제 / 중첩, multi-signal 추출 인프라 (VCD+fsdbreport), scan epc 후보, flow_anomalies 진단, fsdb2vcd clockless 경로 버그 수정 |
 | v0.9.0 | ★ millicode 수정: jr/c.jr/tail 등을 no_link_mnemonics로 분류 (jr t0 오분류 → __riscv_save inclusive 폭증 = 이슈 6.1 유력 원인 → 사용자 확인: "많이 좋아졌"으나 잔여 차이 있음). in-text 데이터 심볼 제외 (이슈 6.3 → 사용자 확인: 함수 개수 일치 = 해결). --debug-func/--debug-log. callgrind jcnd=/jump= |
-| v0.11.0 | ① clockless 적응형 period: CMU/DVFS 중간 주파수 변화 감지·재잠금 (off-grid delta 트리거, 이슈 6.5 = cycle 과소 측정의 1차 원인 수정), 명시 --clock-period 시 off-grid 1회 경고 ② scan --check-epc: epc 후보 행동 검증 (변화값의 .text 적중 / PC 불연속 동시성 / 이후 resume commit — 이름 무관, CSR array 원소도 이름 직접 지정 가능) + verdict |
+| v0.11.0 | ① clockless 적응형 period (→ v0.12.0에서 원복) ② scan --check-epc: epc 후보 행동 검증 (유지) |
+| v0.12.0 | ① 적응형 원복: 고정 period + off-grid 감지 시 --clock 가이드 경고 (정책: CMU dump는 clock 필수) ② clocked/clockless 검증 테스트 (동등성 + clocked CMU 정확성) ③ ★ Cortex-M4/M35P 지원: --isr-level (IPSR 레벨 신호) — 진입=새 비0 레벨(선점/tail-chain 중첩), 복귀=외곽 레벨/0으로 하강(중간 ctx 일괄 pop, 최외곽 saved pending 복원 = HW EXC_RETURN이 정확히 원위치 복귀하므로 착지=resume, 주소 매칭 불필요), xPSR dump 시 0x1ff 자동 마스크, wfi wake는 IPSR이 항상 변하므로 별도 규칙 불필요 |
 | v0.10.0 | 사용자 포맷 요구 반영: ① coverage 방출 — ELF code 영역 전체 insn을 zero-cost라도 표기 (미실행 code vs 컴파일 제외 code 구분용; --executed-only로 비활성) ② jump 라인 순서 = cost 라인 → jcnd/jump → position-only 라인(0xPC LINE) 반복 ③ cond branch 양방향 기록 (taken + fall-through, jcnd=30/100·70/100 합=실행수, 분모=방향 합) ④ IndJmp/DirJmp 이벤트 제거 (8개) |
 
 테스트: 97개 통과 (tests/). 실 ELF 통합 테스트 포함 (호스트 gcc).
@@ -220,12 +221,19 @@ wavescope profile --wave all.vcd --elf fw.elf \
    불가 — CMU가 양방향 조절하면 clock dump + --clock이 정답 (아래 6.5b).
    기존 dump 재실행으로 Cy 재검증 필요; relock 시점/period가 stderr에
    찍히니 CMU 설정과 대조할 것. sw 4개 = Cy 2858/1715/... 패턴도 재확인.
-5b. **clock dump 권고 판단** — 사용자 질문("clock을 전달해야?")에 대한
-   결론: 이번 케이스(빨라짐)는 clockless 적응형으로 충분. 단 (a) CMU가
-   느려지는 방향(정배수)도 쓰거나 (b) 전환이 잦아 relock window(64
-   commit) 내 오귀속이 신경 쓰이면 core clock 1-bit dump + --clock이
-   유일하게 정확 (cycle = edge count, 주파수 변화에 무관). mcycle CSR
-   dump는 multi-bit가 매 cycle 토글이라 clock보다 비쌈 — 비추.
+5b. **★ v0.11.0 적응형 period는 v0.12.0에서 원복** — 사용자 실 dump에서
+   실패: "결과가 엄청 오래 걸리고 모든 event가 0". 원인은 합성 테스트로
+   재현 못 함 (실 파형에서만; off-grid 이벤트 빈발로 relock이 연쇄
+   오발동해 스트림을 잘못 소모했을 가능성 의심). **확정 정책**: clock
+   변화 없는 dump = 기존 고정 period 방식 그대로 (검증됨). clock 변화
+   있는 dump = clockless로는 지원하지 않음 — off-grid delta 감지 시
+   (비용: 샘플당 mod 1회) "clock을 dump하고 --clock을 쓰라"는 명시
+   경고를 첫 발생 + 종료 시 출력. 양 경로 검증 완료: 고정 clock에서
+   clocked/clockless 프로파일 event 단위 동일(tests/test_clock_paths),
+   CMU 상황에서 clocked는 edge count라 정확함을 테스트로 고정.
+   **edge 샘플링 의미론 주의**: edge N에서 같은 timestamp에 써진 값은
+   edge N+1에서 샘플됨 (flop 타이밍상 올바름) — 합성 VCD는 마지막 pc
+   write 뒤 trailing edge 필요, 실 dump는 자연 충족.
 6. ~~indirect jump 직후 인터럽트 감지 불가~~ → **v0.8.0에서 --epc로 해결**
    (mepc dump 필요 — 사용자에게 waveform에 mepc 추가 dump 요청해야 함).
    실 waveform 검증 대기. epc 모드의 flow_anomalies 수치가 크면
@@ -254,18 +262,15 @@ isr-exit/stack-saturated — 이슈 6.1용), `isr enter/exit`(clamp 표시),
 
 ## 7. 로드맵 (미착수)
 
-- **ISA별 exception 신호 일반화 (설계 완료, 미구현)**:
+- **ISA별 exception 신호** (타깃 확정: 사용자 = RISC-V e24 +
+  **Cortex-M4, Cortex-M35P**):
+  - Cortex-M4/M35P: ★ v0.12.0에서 --isr-level로 구현 완료 (위 표 참조;
+    M4=ARMv7E-M, M35P=ARMv8-M Mainline — IPSR 의미론 동일, Secure/
+    Non-secure 뱅킹은 IPSR에 영향 없음). 미구현 잔여: IPSR 신호도 dump에
+    없을 때의 vector table(__Vectors) 기반 진입 휴리스틱 (--vector-table
+    로드맵), scan에 ipsr/psr 이름 랭킹.
   - AArch64: ELR_EL1/EL2/EL3가 mepc 등가 (resume 주소) — 현행 --epc
     그대로 동작할 것. scan epc 랭킹에 elr 토큰 추가만 하면 됨.
-  - ARM Cortex-M: epc 없음. IPSR(xPSR[8:0], 현재 exception number)이
-    최적 신호 — **레벨 의미론**이라 새 모드 필요 (--isr-level-signal:
-    진입 = 0→비0 또는 값 변화(선점/중첩), 복귀 = 이전 값 복원).
-    resume 주소는 신호에 없으므로 saved pending의 fallthrough/target
-    추정 + 복귀 착지 매칭(HW가 EXC_RETURN으로 정확히 복귀). IPSR도
-    없으면: ELF vector table(__Vectors/주소 0)에서 handler entry 집합
-    추출 → "call 없이 handler entry 착지" 진입 휴리스틱 강화
-    (--vector-table 옵션 후보). PC 스트림의 0xFFFFFFFx(EXC_RETURN)
-    출현도 exit marker로 활용 가능.
   - epc 검토 표준 절차 (사용자 안내용): ① scan 이름 랭킹 → ② scan
     --check-epc 행동 검증 (CSR array면 'wavescope signals --grep csr'로
     원소 나열 후 --check-epc name1,name2 직접 지정) → ③ profile 실행 후

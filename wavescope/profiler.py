@@ -90,14 +90,15 @@ class Pending(object):
 
 
 class IsrCtx(object):
-    __slots__ = ("depth", "resume", "saved", "kind")
+    __slots__ = ("depth", "resume", "saved", "kind", "level")
 
-    def __init__(self, depth, resume, saved=None, kind="heur"):
+    def __init__(self, depth, resume, saved=None, kind="heur", level=None):
         self.depth = depth        # call-stack depth at exception entry
         self.resume = resume      # architectural resume PC (mepc), if known
-        self.saved = saved        # interrupted Pending (epc mode), like
-                                  # the simulator's IsrInfo branch state
-        self.kind = kind          # 'epc' | 'heur'
+        self.saved = saved        # interrupted Pending (epc/level mode),
+                                  # like the simulator's IsrInfo branch state
+        self.kind = kind          # 'epc' | 'heur' | 'lvl'
+        self.level = level        # exception number (level mode: IPSR)
 
 
 class FrameCtx(object):
@@ -132,7 +133,8 @@ class Profile:
         self.drained_frames = 0
         self.drained_top: List[Tuple[int, int, int]] = []  # (call_pc, callee, acc_ir)
         # --- epc-mode diagnostics ---
-        self.epc_mode = False        # an epc value was actually seen
+        self.epc_mode = False        # any signal-driven ISR mode
+        self.isr_kind = None         # 'epc' | 'level' when signal-driven        # an epc value was actually seen
         self.spurious_epc = 0        # same-function mepc changes suppressed
         self.flow_anomalies = 0      # unexplained discontinuities (epc mode)
         self.isr_open = 0            # ISR contexts alive at end of trace
@@ -325,7 +327,9 @@ def _unreachable_successor(p: Pending, next_pc: int) -> Tuple[bool, Optional[int
 def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
         classifier, max_stack: int = 4096,
         clamp_exception_cycles: bool = True,
-        debug: Optional[DebugTrace] = None) -> Profile:
+        debug: Optional[DebugTrace] = None,
+        aux_mode: str = "epc",
+        level_mask: Optional[int] = None) -> Profile:
     """Consume (tick, pc[, epc]) samples and build a Profile.
 
     Each new PC value is one committed instruction.  Its cycle cost is
@@ -334,8 +338,17 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
     ticks are value holds and produce no new commit; the widened gap is
     charged to the next instruction that commits.
 
-    Samples may carry a third element: the epc CSR (mepc) value at that
-    commit, enabling exact ISR entry/exit detection (see module doc).
+    Samples may carry a third element interpreted per aux_mode:
+    - "epc"   (RISC-V mepc / AArch64 ELR_ELx): the exception RESUME
+      ADDRESS -- entry on value change, exit on committing the value.
+    - "level" (Cortex-M IPSR / xPSR with level_mask=0x1ff): the ACTIVE
+      EXCEPTION NUMBER -- 0 is thread mode.  Entry when the value
+      changes to an unseen nonzero level (preemption and tail-chaining
+      both nest); exit when it returns to an outer level or 0, popping
+      every context in between (the outermost popped context's saved
+      Pending is the interrupted one to resolve -- hardware returns
+      exactly to the interrupted instruction via EXC_RETURN, so the
+      landing pc IS the resume point and no address matching is needed).
     """
     prof = Profile(binary)
     prof.debug = dbg = debug
@@ -345,6 +358,8 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
     pending: Optional[Pending] = None
     n_committed = 0
 
+    # level-signal state (Cortex-M IPSR); dict so step() can mutate it
+    st_lvl: Dict = {"init": False, "prev": 0}
     # epc / wfi state (simulator update_epc + wfi handlers)
     epc_init = False
     prev_epc: Optional[int] = None
@@ -495,10 +510,65 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
             if (cls.is_cond_branch or cls.is_jump) and not cls.is_indirect:
                 target = direct_target(insn)
 
-        # --- 1. ISR entry via epc (simulator update_epc) ------------------
+        # --- 1L. level-signal ISR entry/exit (Cortex-M IPSR) --------------
         entered = False
-        if epc is not None:
+        if aux_mode == "level" and epc is not None:
+            lvl = (epc & level_mask) if level_mask else epc
             prof.epc_mode = True
+            prof.isr_kind = "level"
+            if not st_lvl["init"] and n_committed == 0:
+                st_lvl["init"] = True          # trace-start baseline: the
+                st_lvl["prev"] = lvl           # dump may begin inside a
+                st_lvl["base"] = lvl           # handler (IPSR != 0)
+            elif not st_lvl["init"] or lvl != st_lvl["prev"]:
+                st_lvl["init"] = True
+                st_lvl.setdefault("base", 0)
+                st_lvl["prev"] = lvl
+                outer = (lvl == 0 or lvl == st_lvl["base"]
+                         or any(c.kind == "lvl" and c.level == lvl
+                                for c in isr_ctxs))
+                if outer:
+                    # EXIT down to that level: pops every context above
+                    # it (a direct N->0 covers tail-chained handlers in
+                    # one change).  Hardware resumes exactly at the
+                    # interrupted instruction, so the current pc IS the
+                    # resume point: restore the OUTERMOST popped saved
+                    # Pending and resolve it against this landing.
+                    popped = None
+                    while isr_ctxs and isr_ctxs[-1].kind == "lvl" and                             isr_ctxs[-1].level != lvl:
+                        popped = isr_ctxs.pop()
+                        _unwind_to(prof, stack,
+                                   min(popped.depth, len(stack)),
+                                   "isr-exit(level)")
+                    if popped is not None:
+                        pending = popped.saved
+                        if dbg is not None:
+                            dbg.note(f"isr exit(level->{lvl}) at 0x{pc:x} "
+                                     f"depth->{len(stack)} "
+                                     f"nested={len(isr_ctxs)}")
+                else:
+                    # ENTRY: new nonzero level (interrupt, preemption,
+                    # or tail-chain -- tail-chain nests here and fully
+                    # unwinds at the eventual return to an outer level)
+                    isr_ctxs.append(IsrCtx(depth=len(stack), resume=None,
+                                           saved=pending, kind="lvl",
+                                           level=lvl))
+                    if dbg is not None:
+                        sv = (f" saved-pending={pending.insn.mnemonic}"
+                              f"@0x{pending.pc:x}" if pending else "")
+                        dbg.note(f"isr enter(level={lvl}) handler=0x{pc:x} "
+                                 f"depth={len(stack)}{sv} "
+                                 f"clamp Cy {cycles}->1")
+                    pending = None
+                    prof.exceptions += 1
+                    if clamp_exception_cycles:
+                        cycles = 1
+                    entered = True
+
+        # --- 1. ISR entry via epc (simulator update_epc) ------------------
+        if aux_mode == "epc" and epc is not None:
+            prof.epc_mode = True
+            prof.isr_kind = "epc"
             if not epc_init and n_committed == 0:
                 # trace-start baseline: mepc may hold a stale value from
                 # before the dump began; only CHANGES from here are traps
@@ -542,7 +612,9 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
         # --- 2. ISR exit ----------------------------------------------------
         if not entered and isr_ctxs:
             ctx = isr_ctxs[-1]
-            if ctx.kind == "epc":
+            if ctx.kind == "lvl":
+                pass                 # level contexts exit on the signal only
+            elif ctx.kind == "epc":
                 # simulator: committing the saved epc address restores the
                 # pre-interrupt context (works after indirect jumps too)
                 if pc == ctx.resume:

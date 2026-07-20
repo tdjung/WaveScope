@@ -234,11 +234,28 @@ def cmd_profile(args) -> int:
 
     classifier = get_classifier(args.isa, args.isa_ext)
 
+    if args.epc and args.isr_level:
+        print("[wavescope] --epc and --isr-level are mutually exclusive "
+              "(address-valued mepc/ELR vs level-valued IPSR)",
+              file=sys.stderr)
+        return 2
+    isr_sig = args.epc or args.isr_level
+    aux_mode = "level" if args.isr_level else "epc"
+    level_mask = None
+    if args.isr_level_mask:
+        level_mask = int(args.isr_level_mask, 0)
+    elif args.isr_level and "psr" in args.isr_level.lower() \
+            and "ipsr" not in args.isr_level.lower():
+        level_mask = 0x1FF   # full xPSR dumped: isolate the IPSR field
+        print("[wavescope] --isr-level looks like a full xPSR: masking "
+              "with 0x1ff to isolate IPSR (override with "
+              "--isr-level-mask)", file=sys.stderr)
+
     print(f"[wavescope] reading waveform: {args.wave}", file=sys.stderr)
     samples = open_pc_stream(args.wave, args.clock, args.pc,
                              valid=args.valid, sample_edge=args.edge,
                              clock_period=args.clock_period,
-                             cfg=_wave_cfg(args), epc=args.epc)
+                             cfg=_wave_cfg(args), epc=isr_sig)
     debug = None
     dbg_out = None
     if args.debug_func:
@@ -276,24 +293,30 @@ def cmd_profile(args) -> int:
 
     prof = run(samples, binary, classifier,
                clamp_exception_cycles=not args.no_isr_clamp,
-               debug=debug)
+               debug=debug, aux_mode=aux_mode, level_mask=level_mask)
     if dbg_out is not None and dbg_out is not sys.stderr:
         print(f"[wavescope] debug trace: {debug.events} events -> "
               f"{args.debug_log}", file=sys.stderr)
         dbg_out.close()
 
-    if args.epc and not prof.epc_mode:
-        print(f"[wavescope] WARNING: --epc {args.epc} never carried a "
-              f"defined value; fell back to heuristic ISR detection. "
-              f"Check the signal with 'wavescope signals --grep epc'.",
-              file=sys.stderr)
-    if prof.epc_mode:
+    if isr_sig and not prof.epc_mode:
+        print(f"[wavescope] WARNING: {'--epc' if args.epc else '--isr-level'}"
+              f" {isr_sig} never carried a defined value; fell back to "
+              f"heuristic ISR detection. Check the signal with "
+              f"'wavescope signals --grep <name>'.", file=sys.stderr)
+    if prof.isr_kind == "level":
+        print(f"[wavescope] level mode (IPSR): {prof.exceptions} exception "
+              f"entries (incl. preemption/tail-chaining)"
+              + (f", {prof.isr_open} still active at end of trace"
+                 if prof.isr_open else ""), file=sys.stderr)
+    elif prof.epc_mode:
         print(f"[wavescope] epc mode: {prof.exceptions} ISR entries "
               f"(mepc change / wfi wake), {prof.spurious_epc} spurious "
               f"same-function epc changes suppressed"
               + (f", {prof.isr_open} ISR contexts never returned to their "
                  f"epc (context switch inside a handler?)"
                  if prof.isr_open else ""), file=sys.stderr)
+    if prof.epc_mode:
         if prof.flow_anomalies:
             print(f"[wavescope] WARNING: {prof.flow_anomalies} control-flow "
                   f"discontinuities NOT explained by an ISR -- if the PC "
@@ -432,6 +455,18 @@ def main(argv=None) -> int:
     pp.add_argument("--no-demangle", action="store_true",
                     help="keep mangled C++/Rust symbol names "
                          "(default: demangle via objdump -C)")
+    pp.add_argument("--isr-level", metavar="SIGNAL",
+                    help="Cortex-M (M4/M35P) exception tracking: the IPSR "
+                         "signal (active exception number; 0 = thread "
+                         "mode). Entry = change to a new nonzero level "
+                         "(preemption/tail-chain nest), exit = return to "
+                         "an outer level or 0. If only the full xPSR is "
+                         "dumped, IPSR is isolated automatically (mask "
+                         "0x1ff). Mutually exclusive with --epc")
+    pp.add_argument("--isr-level-mask", metavar="HEX", default=None,
+                    help="mask applied to the --isr-level value before "
+                         "interpreting it as the exception number "
+                         "(e.g. 0x1ff for a full xPSR dump)")
     pp.add_argument("--debug-func", action="append", metavar="NAME",
                     help="trace cycle accumulation and frame push/pop "
                          "(inclusive cost) events for this function -- "

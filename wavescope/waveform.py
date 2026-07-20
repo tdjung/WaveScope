@@ -107,9 +107,7 @@ def open_pc_stream(path: str, clock: Optional[str], pc: str,
         print(f"[wavescope] no clock signal: using "
               f"{'given' if clock_period else 'auto-detected'} period of "
               f"{period} dump time units as 1 cycle"
-              + ("" if clock_period else
-                 " (adaptive: mid-trace CMU/DVFS frequency changes are "
-                 "re-locked and reported)"), file=sys.stderr)
+              , file=sys.stderr)
         return samples
 
     tools = fsdb_mod.find_tools(cfg.verdi_home,
@@ -138,7 +136,7 @@ def open_pc_stream(path: str, clock: Optional[str], pc: str,
         period, samples = changes_to_ticks(changes, period=period)
         print(f"[wavescope] no clock signal: period={period} "
               f"fsdb time units = 1 cycle"
-              + ("" if clock_period else " (adaptive)"), file=sys.stderr)
+, file=sys.stderr)
         return samples
     if tools.fsdb2vcd:
         print(f"[wavescope] FSDB: converting via fsdb2vcd "

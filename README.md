@@ -220,11 +220,18 @@ instruction that eventually commits.
 - [x] `scan`: PC/clock/mepc signal candidate discovery, plus
       `--check-epc`: behavioral validation of epc candidates against the
       PC stream (works for CSR-array elements name ranking cannot find)
-- [x] Adaptive clockless period: mid-trace clock-frequency changes
-      (CMU/DVFS) are detected from off-grid time deltas and re-locked,
-      with each change reported (a switch to a slower clock at an exact
-      multiple of the old period is fundamentally ambiguous without the
-      clock -- dump the clock and use `--clock` in that case)
+- [x] Mid-trace clock-frequency change (CMU/DVFS) detection: clockless
+      mode keeps a fixed period and cannot follow frequency changes --
+      off-grid time deltas are detected and reported with explicit
+      guidance to dump the core clock and use `--clock`, whose
+      edge-counted cycles are exact under any frequency schedule
+- [x] Cortex-M (M4 / M35P) exception tracking via `--isr-level <IPSR>`:
+      these cores have no epc; the IPSR level signal drives entry
+      (new nonzero level; preemption and tail-chaining nest) and exit
+      (drop to an outer level or 0), and hardware resumes exactly at the
+      interrupted instruction, so interrupted-branch judgement works the
+      same as in `--epc` mode. Full-xPSR dumps are masked to the IPSR
+      field automatically
 - [x] Callgrind output with call tree + inclusive costs
 - [x] Conditional/unconditional jump records (`jcnd=`/`jump=`), both
       branch directions (taken + fall-through) so per-direction counts

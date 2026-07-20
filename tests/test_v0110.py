@@ -1,5 +1,5 @@
-"""v0.11.0: adaptive clockless period (CMU/DVFS mid-trace frequency
-changes) and behavioral epc validation (scan --check-epc)."""
+"""Fixed clockless period with CMU/DVFS guidance (v0.12.0 revert of the
+v0.11.0 adaptive re-lock) and behavioral epc validation (--check-epc)."""
 
 import os
 import sys
@@ -13,76 +13,62 @@ from wavescope.vcd_reader import changes_to_ticks
 
 
 def ticks_of(chg, **kw):
-    relocks = []
-    kw.setdefault("on_relock", lambda t, o, n: relocks.append((t, o, n)))
     p, gen = changes_to_ticks(iter(chg), **kw)
     out = list(gen)
     d = [out[i + 1][0] - out[i][0] for i in range(len(out) - 1)]
-    return p, relocks, out, d
+    return p, [], out, d
 
 
-class TestAdaptivePeriod(unittest.TestCase):
-    def test_faster_clock_relocks(self):
-        # 300 commits @10ns, CMU switch (12ns straddle), 300 @2ns with a
-        # 3-cycle stall afterwards -- the user's exact failure mode:
-        # without adaptation everything after the switch collapses to 1
-        chg = [(i * 10, i) for i in range(300)]
-        t0 = chg[-1][0] + 12
-        chg += [(t0 + i * 2, 1000 + i) for i in range(300)]
-        chg += [(chg[-1][0] + 6 + i * 2, 2000 + i) for i in range(50)]
-        p, rl, out, d = ticks_of(chg)
-        self.assertEqual(p, 10)
-        self.assertEqual([(o, n) for _, o, n in rl], [(10, 2)])
-        self.assertEqual(set(d[:299]), {1})          # old region intact
-        self.assertEqual(set(d[300:599]), {1})       # new region 1-cycle
-        self.assertEqual(d[599], 3)                  # stall still visible
+class TestFixedPeriodWithGuidance(unittest.TestCase):
+    """v0.12.0: the v0.11.0 adaptive re-lock is reverted -- the period
+    is fixed for the whole trace, and mid-trace frequency changes
+    (off-grid deltas) produce explicit guidance to dump the clock and
+    use --clock instead."""
 
-    def test_non_multiple_period(self):
-        chg = [(i * 10, i) for i in range(200)] \
-            + [(2003 + i * 3, 1000 + i) for i in range(200)]
-        p, rl, out, d = ticks_of(chg)
-        self.assertEqual([(o, n) for _, o, n in rl], [(10, 3)])
-        self.assertEqual(set(d[201:]), {1})
-
-    def test_change_inside_warmup(self):
-        # switch after only 100 commits (< warmup): head-lock keeps the
-        # first grid, relock handles the rest
-        chg = [(i * 10, i) for i in range(100)] \
-            + [(992 + i * 2, 1000 + i) for i in range(400)]
-        p, rl, out, d = ticks_of(chg)
-        self.assertEqual(p, 10)
-        self.assertEqual(set(d[:99]), {1})
-        self.assertEqual(set(d[101:]), {1})
-
-    def test_double_change(self):
-        chg = [(i * 10, i) for i in range(200)]
-        chg += [(1992 + i * 2, 1000 + i) for i in range(200)]
-        chg += [(chg[-1][0] + 5 + i * 5, 2000 + i) for i in range(200)]
-        p, rl, out, d = ticks_of(chg)
-        self.assertEqual([(o, n) for _, o, n in rl], [(10, 2), (2, 5)])
-        self.assertEqual(set(d[:199]) | set(d[201:399]) | set(d[401:]), {1})
-
-    def test_stall_locked_warmup_self_heals(self):
-        # warmup sees only 2-cycle gaps -> locks 2x the true period;
-        # the first 1-cycle gap is off-grid and triggers a downward relock
-        chg = [(i * 20, i) for i in range(100)] \
-            + [(1990 + i * 10, 1000 + i) for i in range(200)]
-        p, rl, out, d = ticks_of(chg)
-        self.assertEqual([(o, n) for _, o, n in rl], [(20, 10)])
-        self.assertEqual(set(d[101:]), {1})
-
-    def test_explicit_period_disables_adaptation(self):
-        chg = [(i * 10, i) for i in range(100)] \
-            + [(992 + i * 2, 1000 + i) for i in range(50)]
-        p, rl, out, d = ticks_of(chg, period=10)
-        self.assertEqual(rl, [])
-        self.assertEqual(p, 10)
-
-    def test_uniform_clock_untouched(self):
+    def test_uniform_clock(self):
         chg = [(i * 7, i) for i in range(500)]
         p, rl, out, d = ticks_of(chg)
-        self.assertEqual((p, rl), (7, []))
+        self.assertEqual(p, 7)
         self.assertEqual(set(d), {1})
+
+    def test_explicit_period_respected(self):
+        chg = [(i * 10, i) for i in range(100)]
+        p, rl, out, d = ticks_of(chg, period=5)
+        self.assertEqual(p, 5)
+        self.assertEqual(set(d), {2})
+
+    def test_offgrid_warns_and_keeps_period(self):
+        import io
+        # frequency change AFTER the warmup window (the realistic case:
+        # warmup is 2048 changes, real dumps are millions)
+        chg = [(i * 10, i) for i in range(2500)] \
+            + [(25002 + i * 2, 9000 + i) for i in range(50)]
+        err = io.StringIO()
+        real = sys.stderr
+        sys.stderr = err
+        try:
+            p, gen = changes_to_ticks(iter(chg))
+            out = list(gen)
+        finally:
+            sys.stderr = real
+        self.assertEqual(p, 10)                       # period stays fixed
+        self.assertEqual(len(out), 2550)
+        msg = err.getvalue()
+        self.assertIn("off the 10-unit clock grid", msg)
+        self.assertIn("--clock", msg)
+        self.assertIn("off-grid PC change(s) total", msg)
+
+    def test_no_warning_on_clean_trace(self):
+        import io
+        err = io.StringIO()
+        real = sys.stderr
+        sys.stderr = err
+        try:
+            p, gen = changes_to_ticks(iter([(i * 4, i) for i in range(50)]))
+            list(gen)
+        finally:
+            sys.stderr = real
+        self.assertNotIn("WARNING", err.getvalue())
 
 
 class TestCheckEpcBehavior(unittest.TestCase):
