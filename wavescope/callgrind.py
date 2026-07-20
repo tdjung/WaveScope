@@ -151,7 +151,7 @@ def _write_call(prof: Profile, out: TextIO, b: BinaryInfo,
     cf = b.func_at(callee)
     callee_pc = callee
     cfl, cline = b.line_at(callee_pc)
-    out.write(f"cfi={cfl}\n")
+    out.write(f"cfl={cfl}\n")  # cfl= == cfi= (spec synonyms); cfl matches the sim output for diffing
     out.write(f"cfn={cf.name if cf else f'0x{callee:x}'}\n")
     out.write(f"calls={cs.count} 0x{callee:x} {cline}\n")
     _, line = b.line_at(call_pc)

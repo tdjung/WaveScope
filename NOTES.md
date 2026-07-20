@@ -1,7 +1,7 @@
 # WaveScope — Project Notes (대화 인수인계용)
 
 > 새 대화 시작 시: 이 파일과 README.md를 먼저 읽고 이어서 작업.
-> 마지막 업데이트: 2026-07-17, v0.15.0
+> 마지막 업데이트: 2026-07-17, v0.15.1
 
 ## 1. 프로젝트 개요
 
@@ -277,6 +277,39 @@ isr-exit/stack-saturated — 이슈 6.1용), `isr enter/exit`(clamp 표시),
 `unmatched-ret`, `flow-anomaly`. 끝에 함수별 self 합계 + incoming arc
 전수(개수·inclusive)와 incl/self 비율 summary. 사용자에게 시뮬레이터
 로그와 같은 함수 구간을 나란히 받아 대조하는 워크플로 제안할 것.
+
+## 6c. sim 엔진 전사 준비 (진행 중 — 사용자 정보 대기)
+
+방침 확정: 의미론 계층을 simulator_reference와 라인 대조 가능한 문자
+전사본(simcore)으로 새로 작성, reader 계층 공유, --engine sim|legacy
+기간 한정 투트랙, golden diff 후 sim 승격. 제약: 사용자 테스트 환경은
+폐쇄망 (git pull만 가능, push 불가) → 모든 자료는 채팅 텍스트로 수신,
+검증은 "우리가 push → 사용자 실행 → 결과 회신" 루프.
+
+사용자에게 요청한 정보 목록 (회신 오는 대로 여기에 체크):
+[ ] 1. Group 멤버십 정의 (decode.belong_to): BRANCH/JUMP/CALL/
+       INDIRECT_JUMP/DIRECT_JUMP/LOAD/STORE 각각의 명령 목록. 특히
+       ret·jr의 JUMP 여부(=Bi/Bim 부과), jal t0의 CALL 여부, c.* 압축,
+       amo(Dr/Dw?), fence/csr, mret 분류
+[ ] 2. update_branch() 전문
+[ ] 3. check_branch_type()/handler_branch()의 레퍼런스 생략부:
+       real_caller 치환 전체, save helper 특수 처리 전체
+[ ] 4. remain_call_stack_process() 전문
+[ ] 5. isCompilerHelper()/FunctionType 판정 정확한 코드
+[ ] 6. update_epc()/wfi 핸들러 최신본 (레퍼런스 이후 수정분)
+[ ] 7. 심볼라이제이션: pc→(func,file,line) 생성 방법, 별칭(restore_0~3
+       동일 주소) 이름 선택, static 중복명, size 0 심볼 범위, demangle
+[ ] 8. writer 상세: 함수 출력 순서, 미실행 함수 표기, positions 설정,
+       subposition 절대/상대, summary: 형식, cfl/cfn/calls 순서,
+       jump/jcnd 라인 사용 여부·형식, 이벤트 이름 문자열
+[ ] 9. 알려진 시뮬레이터 버그 목록 + 재현/수정 정책
+[ ] 10. Bcm: sim 내부 상태로도 불필요한지 최종 확인
+[ ] 11. ARM(M4/M35P)도 같은 시뮬레이터로 프로파일하는지
+[ ] 12. 초소형 golden (폐쇄망 대응): 우리가 레포에 작은 test FW를
+        올리면 사용자가 시뮬레이터로 돌려 (a) callgrind 출력 전문
+        (b) 가능하면 update_profile 진입부 fprintf 패치로 commit 트레이스
+        (pc,cycle,epc CSV) 앞부분 수천 줄을 채팅으로 회신
+        → 이것이 확보되면 offline 수렴 가능 (인터랙션 최소화)
 
 ## 7. 로드맵 (미착수)
 
