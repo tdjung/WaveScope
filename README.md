@@ -241,6 +241,10 @@ instruction that eventually commits.
 - [x] Callgrind output with call tree + inclusive costs (event order
       `Ir Dr Dw Bc Bi Bim Cy`, `fl=` emitted only on change -- both for
       line-diffing against an existing profiler's output)
+- [x] `--engine sim|legacy|both`: a literal transcription of the
+      reference simulator's algorithm (simcore) runs alongside the
+      native engine; `both` writes both outputs and prints an
+      arc-level divergence summary between them
 - [x] `--check-inclusive`: per-function invariant report (incoming arc
       inclusive vs self + outgoing) that pinpoints functions whose
       frames were cut early or entered untracked

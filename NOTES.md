@@ -1,7 +1,7 @@
 # WaveScope — Project Notes (대화 인수인계용)
 
 > 새 대화 시작 시: 이 파일과 README.md를 먼저 읽고 이어서 작업.
-> 마지막 업데이트: 2026-07-17, v0.15.1
+> 마지막 업데이트: 2026-07-18, v0.16.0
 
 ## 1. 프로젝트 개요
 
@@ -278,7 +278,44 @@ isr-exit/stack-saturated — 이슈 6.1용), `isr enter/exit`(clamp 표시),
 전수(개수·inclusive)와 incl/self 비율 summary. 사용자에게 시뮬레이터
 로그와 같은 함수 구간을 나란히 받아 대조하는 워크플로 제안할 것.
 
-## 6c. sim 엔진 전사 준비 (진행 중 — 사용자 정보 대기)
+## 6c. sim 엔진 (v0.16.0에서 전사 완료 — wavescope/simcore.py)
+
+레퍼런스를 문자 그대로 전사한 SimProfiler (상태명·제어흐름·quirk까지
+동일: update/update_epc/update_branch/check_branch_type/handler_branch/
+wfi 핸들러/remain_call_stack_process). 사용법:
+  wavescope profile ... --engine sim        # sim 출력
+  wavescope profile ... --engine both       # sim 출력 + <out>.legacy +
+                                            # 엔진 간 발산 요약(stderr)
+Feeder 어댑터 3개만 존재 (코드에 ADAPTER 표시): A1 taken은 다음 commit
+착지로 1-commit 지연 판정(트랩 개입 시 taken bool만 오염 가능 — 착지
+자체는 resume 재해석으로 정확), A2 prev_epc는 첫 commit의 정의값으로
+baseline(중간 정의는 첫 trap), A3 epc 미정의 시 update_epc 생략.
+재현된 quirk: Q1 update_epc의 infos_[pc] operator[] 삽입 버그.
+sim 미지원: --isr-level(ARM), --no-isr-clamp, healing/anomaly 진단,
+--debug-func (legacy 전용, both로 병행 가능).
+
+★★ 전사가 즉시 드러낸 레퍼런스 의미론 (사용자와 논의 필요):
+`jal ra,__riscv_restore_0` 에필로그는 non-tail CALL entry를 만들고,
+restore의 ret에서 RETURN은 그 entry "하나만" pop (tail-chain while은
+is_tail에서만 연쇄) → 호출한 함수 자신의 frame은 늦게(상위의 tail
+chain에서) 닫혀 arc inclusive에 caller의 복귀 후 명령들이 섞임.
+시뮬레이터도 동일하게 동작할 것 — 사용자 자기 수치(1104)에도 restore
+call이 빠져 보인다는 보고와 정합 가능성. tests/test_simcore.py의
+test_jal_restore_late_flush가 이 의미론을 고정, legacy와의 발산은
+test_jal_restore_divergence로 가시화. 검증: tail형 에필로그 클린
+trace에선 두 엔진 arc/이벤트 완전 일치 (합성+실물 ELF 모두).
+
+### 정보 회신 기록 (2026-07-18 사용자 답변)
+1. Group 멤버십 = 현행 classifier 유지 (jal t0 = CALL 확정)
+2. update_branch 전문 수신 (전사 반영)
+3/4. check_branch_type/handler_branch/remain 생략부 없음 확정
+5. FunctionType: 이름에 __riscv_save "포함"→SAVE_HELPER,
+   __riscv_restore 포함→RESTORE_HELPER (contains, prefix 아님)
+6. update_epc/wfi 수정본 없음  7/8. 심볼라이제이션·writer 현행 유지
+9. ARM은 시뮬레이터에 없음 (추후 추가) — riscv 우선
+- golden pack: 폐쇄망이라 불가 → push→사용자 실행→회신 루프 유지
+
+## (구) 준비 체크리스트
 
 방침 확정: 의미론 계층을 simulator_reference와 라인 대조 가능한 문자
 전사본(simcore)으로 새로 작성, reader 계층 공유, --engine sim|legacy

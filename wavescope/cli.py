@@ -252,11 +252,30 @@ def cmd_profile(args) -> int:
               "--isr-level-mask)", file=sys.stderr)
 
     print(f"[wavescope] reading waveform: {args.wave}", file=sys.stderr)
-    samples = open_pc_stream(args.wave, args.clock, args.pc,
-                             valid=args.valid, sample_edge=args.edge,
-                             clock_period=args.clock_period,
-                             cfg=_wave_cfg(args), epc=isr_sig,
-                             clock_counter=args.clock_counter)
+
+    def make_stream():
+        return open_pc_stream(args.wave, args.clock, args.pc,
+                              valid=args.valid, sample_edge=args.edge,
+                              clock_period=args.clock_period,
+                              cfg=_wave_cfg(args), epc=isr_sig,
+                              clock_counter=args.clock_counter)
+
+    samples = make_stream()
+
+    if args.engine != "legacy":
+        if args.isr_level:
+            print("[wavescope] --engine sim supports RISC-V epc semantics "
+                  "only (--isr-level is a legacy-engine feature)",
+                  file=sys.stderr)
+            return 2
+        if args.no_isr_clamp:
+            print("[wavescope] note: --no-isr-clamp is ignored by the sim "
+                  "engine (the reference has no such switch)",
+                  file=sys.stderr)
+        if args.debug_func and args.engine == "sim":
+            print("[wavescope] note: --debug-func traces the legacy "
+                  "engine; use --engine both to run it alongside",
+                  file=sys.stderr)
     debug = None
     dbg_out = None
     if args.debug_func:
@@ -292,9 +311,47 @@ def cmd_profile(args) -> int:
                           for f in watch)
               + f" -> {args.debug_log or 'stderr'}", file=sys.stderr)
 
-    prof = run(samples, binary, classifier,
-               clamp_exception_cycles=not args.no_isr_clamp,
-               debug=debug, aux_mode=aux_mode, level_mask=level_mask)
+    legacy_prof = None
+    if args.engine == "legacy":
+        prof = run(samples, binary, classifier,
+                   clamp_exception_cycles=not args.no_isr_clamp,
+                   debug=debug, aux_mode=aux_mode, level_mask=level_mask)
+    else:
+        from .simcore import compare_profiles, run_sim
+        print("[wavescope] engine: sim (literal transcription of "
+              "docs/simulator_reference.md)", file=sys.stderr)
+        prof = run_sim(samples, binary, classifier)
+        if getattr(prof, "sim_dropped_unknown", 0):
+            print(f"[wavescope] sim: {prof.sim_dropped_unknown} event "
+                  f"charges dropped at pcs outside infos_ (reference "
+                  f"semantics: unknown pc -> no accounting)",
+                  file=sys.stderr)
+        if args.engine == "both":
+            print("[wavescope] engine: legacy (comparison pass)",
+                  file=sys.stderr)
+            prof2 = run(make_stream(), binary, classifier,
+                        clamp_exception_cycles=not args.no_isr_clamp,
+                        debug=debug, aux_mode=aux_mode,
+                        level_mask=level_mask)
+            legacy_prof = prof2
+            cmp = compare_profiles(prof, prof2, binary)
+            print("[wavescope] sim vs legacy (sim - legacy):",
+                  file=sys.stderr)
+            if cmp["total"]:
+                for name, (a, b) in cmp["total"].items():
+                    print(f"[wavescope]   total {name}: sim={a} "
+                          f"legacy={b} (d={a - b:+d})", file=sys.stderr)
+            else:
+                print("[wavescope]   totals identical", file=sys.stderr)
+            for name, dir_, dcy in cmp["self"]:
+                print(f"[wavescope]   self {name}: Ir d={dir_:+d} "
+                      f"Cy d={dcy:+d}", file=sys.stderr)
+            for name, dn, dcy in cmp["arcs"]:
+                print(f"[wavescope]   arc {name}: n d={dn:+d} "
+                      f"inclCy d={dcy:+d}", file=sys.stderr)
+            if not cmp["self"] and not cmp["arcs"] and not cmp["total"]:
+                print("[wavescope]   engines fully agree on this trace",
+                      file=sys.stderr)
     if dbg_out is not None and dbg_out is not sys.stderr:
         print(f"[wavescope] debug trace: {debug.events} events -> "
               f"{args.debug_log}", file=sys.stderr)
@@ -382,6 +439,13 @@ def cmd_profile(args) -> int:
     with open(args.output, "w") as f:
         write_callgrind(prof, f, args.elf, cmd=" ".join(sys.argv[1:]),
                         all_functions=not args.executed_only)
+    if legacy_prof is not None:
+        with open(args.output + ".legacy", "w") as f2:
+            write_callgrind(legacy_prof, f2, args.elf,
+                            cmd=" ".join(sys.argv[1:]),
+                            all_functions=not args.executed_only)
+        print(f"[wavescope] wrote {args.output}.legacy (legacy engine, "
+              f"for diffing)", file=sys.stderr)
 
     totals = ", ".join(f"{n}={v}" for n, v in zip(EVENTS, prof.total))
     print(f"[wavescope] totals: {totals}", file=sys.stderr)
@@ -475,6 +539,13 @@ def main(argv=None) -> int:
     pp.add_argument("--no-demangle", action="store_true",
                     help="keep mangled C++/Rust symbol names "
                          "(default: demangle via objdump -C)")
+    pp.add_argument("--engine", choices=("legacy", "sim", "both"),
+                    default="legacy",
+                    help="profiling engine: 'legacy' (WaveScope's "
+                         "engine with healing/diagnostics), 'sim' "
+                         "(literal transcription of the simulator "
+                         "reference), or 'both' (sim output + legacy "
+                         "output as <out>.legacy + divergence summary)")
     pp.add_argument("--check-inclusive", action="store_true",
                     help="report functions whose incoming-arc inclusive "
                          "differs from self + outgoing-arc inclusive "

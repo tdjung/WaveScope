@@ -163,8 +163,16 @@ class TestRealMillicode(unittest.TestCase):
         # back in main; main epilogue j restore_0
         tr += main[idx + 1:]
         tr += rest0
-        prof = run(iter([(i, pc) for i, pc in enumerate(tr)]), b,
-                   get_classifier("riscv"))
+        samples = [(i, pc) for i, pc in enumerate(tr)]
+        prof = run(iter(samples), b, get_classifier("riscv"))
+
+        # cross-validate the transcribed sim engine on the same real
+        # execution: tail-form millicode epilogues -> full agreement
+        from wavescope.simcore import compare_profiles, run_sim
+        sim = run_sim(iter(samples), b, get_classifier("riscv"))
+        cmp = compare_profiles(sim, prof, b)
+        self.assertEqual(cmp["total"], {}, cmp)
+        self.assertEqual(cmp["arcs"], [], cmp)
 
         self.assertEqual(prof.exceptions, 0)          # no false ISR entries
         r0, r10 = self._addr("__riscv_restore_0"), \
