@@ -1,7 +1,7 @@
 # WaveScope — Project Notes (대화 인수인계용)
 
 > 새 대화 시작 시: 이 파일과 README.md를 먼저 읽고 이어서 작업.
-> 마지막 업데이트: 2026-07-19, v0.20.1
+> 마지막 업데이트: 2026-07-19, v0.20.2
 
 ## 1. 프로젝트 개요
 
@@ -277,6 +277,51 @@ isr-exit/stack-saturated — 이슈 6.1용), `isr enter/exit`(clamp 표시),
 `unmatched-ret`, `flow-anomaly`. 끝에 함수별 self 합계 + incoming arc
 전수(개수·inclusive)와 incl/self 비율 summary. 사용자에게 시뮬레이터
 로그와 같은 함수 구간을 나란히 받아 대조하는 워크플로 제안할 것.
+
+## 6i. v0.20.2 — ★ 다음 세션 최우선 (depth 붕괴 본선, 사용자 새 채팅 예고)
+
+### 사용자 로그 정밀 재구성 (v0.20.1 로그)
+t=145 pop d3 (startup→SYS_init) ← ★★ 병소. SYS_init이 아직 실행 중인데
+  frame이 먼저 pop됨. 이후는 전부 기계적 후폭풍:
+t=147 push d3 (SYS_init→restore_0): pop 후 스택2 + push = depth 3 정합
+  (사용자가 "depth 그대로"라 오해한 부분 — pop 라벨 = pop되는 frame의
+  depth라서 숫자는 전부 정상. 표기 문제 아님을 사용자에게 설명함)
+t=154 pop d3(restore) → d2(BSP→startup) → d1(_start→BSP): restore가
+  TAIL로 push됐고 e3(SYS_init CALL anchor)가 이미 없어서 tail-chain
+  while이 e2(tail), e1(anchor)까지 관통 — 레퍼런스 의미론대로의 동작.
+  e3만 살아있었으면 [restore + e3]에서 멈추고 startup 정상 복귀였음.
+t=158 push d1 (startup→SYS_init...): 빈 스택 위 재시작. legacy도 동일
+  위치 동일 증상.
+
+### 다음 회신으로 판정 가능한 것 (사용자에게 요청함)
+1. t=145/t=154 pop 라인의 [ ... ] 사유 문자열 — 이미 로그에 있음:
+   ret-match mnem@pc -> 0xLANDING / helper-ret-pop / tail-chain pop /
+   RETURN landing 0x.. / isr-exit drained N. v0.20.2에서 사유에 착지
+   주소, push에 "| under 부모함수"까지 추가되어 한 줄로 판정됨.
+2. t=47 "SYS_initi...", t=147 "SYS_initial...", t=158 "SYS_initializ..."
+   가 같은 함수인지 (사용자 말줄임 — 다른 함수일 가능성!)
+3. isr-enter/isr-exit/orphan-xrets/tail-noframe 카운트 + SUSPICIOUS
+   drain 경고 여부.
+
+### t=145 조기 pop 용의자 (사유 문자열로 확정될 것)
+(a) ret-match 오매칭: 어떤 ret의 착지가 우연히 e3.ret_addr과 일치
+(b) helper-ret-pop: jal-restore가 SYS_init 내부 서브콜리에서 표류
+(c) isr-exit: stale ISR ctx의 resume pc 재등장 → depth까지 unwind
+(d) sim이면 RETURN landing 0x.. 사유로 rule1/2/4 중 무엇인지 나옴
+
+### v0.20.2 확정 수정
+- ★ legacy가 교차-함수 cond branch(beqz→opt_memcpy_tail)를 TAIL로
+  push하던 것 제거 — 시뮬레이터는 Group::BRANCH(통계만, arc/frame
+  없음). 사용자가 보고한 sim/legacy 로그 차이의 원인. parity 테스트
+  고정. (sim은 교차 함수 jcnd도 기록, legacy는 intra만 — 잔여 발산
+  항목으로 인지)
+- push에 "| under 부모" 주석, ret-match/helper-ret-pop 사유에 착지
+  주소 추가.
+- 테스트 GIGO에서 발견한 구조적 사실: sim feeder는 ISS 전제로
+  branchType을 신뢰하고 착지를 검증하지 않음 → 놓친 ISR 진입 시
+  jal→handler 가짜 arc 생성 가능 (legacy는 direct target 검증으로
+  보호, indirect는 미보호). "SYS_system_startup→ISR_x push"의 sim측
+  기전 후보.
 
 ## 6h. v0.20.1 — --debug-roots 계측 자체의 버그 수정 (사용자 로그 분석)
 사용자가 본 "이상"의 상당수가 계측 문제였음:

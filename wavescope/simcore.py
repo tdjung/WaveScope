@@ -394,7 +394,9 @@ class SimProfiler(object):
             entry.is_tail_call = False
             entry.events_at_entry = list(self.accumulated_events)
             self.call_stack.append(entry)
-            self._root("push", self.last_pc, cur_pc, "CALL",
+            parent = (" | under " + self.call_stack[-2].callee_func
+                      if len(self.call_stack) >= 2 else "")
+            self._root("push", self.last_pc, cur_pc, "CALL" + parent,
                        len(self.call_stack))
 
             self.calls[self.last_pc][cur_pc].count += 1
@@ -412,7 +414,8 @@ class SimProfiler(object):
                            "empty stack: count only, NO inclusive "
                            "(reference semantics)", 0)
             if self.call_stack:
-                self._root("push", self.last_pc, cur_pc, "TAIL",
+                parent = " | under " + self.call_stack[-1].callee_func
+                self._root("push", self.last_pc, cur_pc, "TAIL" + parent,
                            len(self.call_stack) + 1)
                 tail_entry = CallStackEntry()
                 tail_entry.caller_pc = self.last_pc

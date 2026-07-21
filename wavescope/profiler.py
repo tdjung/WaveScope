@@ -328,8 +328,13 @@ def _push_frame(prof: Profile, stack: List[FrameCtx],
     stack.append(frame)
     if prof.root_log is not None \
             and len(stack) <= prof.root_log["depth"]:
+        parent = ""
+        if len(stack) >= 2 and stack[-2].callee_start is not None:
+            pf = prof.binary.func_at(stack[-2].callee_start)
+            parent = f" | under {pf.name}" if pf else ""
         _root_ev(prof, "push", frame.call_pc, frame.callee_start,
-                 "TAIL" if frame.is_tail else "CALL", len(stack))
+                 ("TAIL" if frame.is_tail else "CALL") + parent,
+                 len(stack))
     if frame.call_pc is not None and frame.callee_start is not None:
         prof.calls[(frame.call_pc, frame.callee_start)].count += 1
     if prof.debug is not None:
@@ -485,7 +490,8 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
                     while j > 0 and stack[j].is_tail:
                         j -= 1
                     _unwind_to(prof, stack, j,
-                               f"ret-match {p.insn.mnemonic}@0x{p.pc:x}")
+                               f"ret-match {p.insn.mnemonic}@0x{p.pc:x} "
+                               f"-> 0x{cur_pc:x}")
                     return
             # Simulator rule 2: a return-like transfer executing INSIDE
             # a millicode helper (restore's ret, save's jr t0) always
@@ -542,7 +548,12 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
             return
 
         # --- tail calls -------------------------------------------------------
-        if taken_transfer and not cls.writes_link and callee_entry and diff_func:
+        # Simulator parity: a CONDITIONAL branch is Group::BRANCH even
+        # when it crosses into another function's entry (beqz ->
+        # opt_memcpy_tail) -- branch statistics only, never an arc or a
+        # frame.  Only UNCONDITIONAL jumps make tail calls.
+        if taken_transfer and not cls.writes_link and callee_entry \
+                and diff_func and not cls.is_cond_branch:
             if cur_func is not None and cur_func in helper_funcs:
                 return          # simulator: tail transfers FROM millicode
                                 # helpers (jr t0 chains etc.) are ignored

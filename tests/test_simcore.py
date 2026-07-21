@@ -342,3 +342,54 @@ class TestKnownHandlerEntry(unittest.TestCase):
         prof = run(iter(tr), b, CL)
         self.assertEqual(prof.exceptions, 0)
         self.assertIn((0x2004, 0x7000), prof.calls)
+
+
+class TestCrossFuncCondBranchParity(unittest.TestCase):
+    """beqz into another function's ENTRY is Group::BRANCH in the
+    simulator -- statistics only, no arc, no frame.  Both engines must
+    agree (legacy used to tail-push it)."""
+
+    def _binary(self):
+        b = milli_binary()
+        from wavescope.disasm import BinaryInfo, Func, Insn
+        b.insns[0x8000] = Insn(0x8000, 4, "addi", "a0,a0,1")
+        b.insns[0x8004] = Insn(0x8004, 4, "beqz", "a0,9000 <tailfn>")
+        b.insns[0x8008] = Insn(0x8008, 4, "ret", "")
+        b.insns[0x9000] = Insn(0x9000, 4, "addi", "a0,a0,2")
+        b.insns[0x9004] = Insn(0x9004, 4, "ret", "")
+        b.funcs.append(Func("memcpy_head", 0x8000, 0x800c))
+        b.funcs.append(Func("memcpy_tail", 0x9000, 0x9008))
+        b._starts = [f.start for f in b.funcs]
+        return b
+
+    def test_no_arc_and_engines_agree(self):
+        b = self._binary()
+        # main jal memcpy_head; beqz taken into memcpy_tail; its ret
+        # returns to main (ra from the original call)
+        tr = [(0, 0x1000), (1, 0x1004)]
+        tr = [(0, 0x0500), (1, 0x1000)]
+        tr = [(i, pc) for i, pc in enumerate(
+            [0x0500,                      # _start jal main
+             0x1000, 0x1004,              # main: save skipped; jal aa->no
+             ])]
+        # simpler: direct call into memcpy_head (0x1000 becomes a plain
+        # insn -- the sim feeder trusts branchType without verifying the
+        # landing, ISS-style, so the trace must be flow-consistent)
+        from wavescope.disasm import Insn
+        b.insns[0x1000] = Insn(0x1000, 4, "addi", "sp,sp,-16")
+        b.insns[0x1004] = Insn(0x1004, 4, "jal", "ra,8000 <memcpy_head>")
+        tr = [(i, pc) for i, pc in enumerate(
+            [0x1000, 0x1004,
+             0x8000, 0x8004,              # beqz taken
+             0x9000, 0x9004,              # tail fn; ret -> back to main
+             0x1008])]
+        sim = run_sim(iter(tr), b, CL)
+        leg = run(iter(tr), b, CL)
+        for prof in (sim, leg):
+            self.assertNotIn((0x8004, 0x9000), prof.calls)
+            self.assertIn((0x1004, 0x8000), prof.calls)
+            # the whole head+tail execution sits in the call arc
+            self.assertEqual(prof.calls[(0x1004, 0x8000)].inclusive[E_IR],
+                             4)
+        cmp = compare_profiles(sim, leg, b)
+        self.assertEqual(cmp["arcs"], [], cmp)
