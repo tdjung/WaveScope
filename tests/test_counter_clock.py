@@ -171,3 +171,36 @@ class TestAutoDetection(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestStreamCache(unittest.TestCase):
+    def test_roundtrip_and_invalidation(self):
+        import shutil
+        from wavescope.waveform import (_read_stream_cache,
+                                        _stream_cache_key,
+                                        _stream_cache_path,
+                                        _write_stream_cache)
+        rows = [(0, 0x1000, None), (1, 0x1004, 0x2000), (5, 0x1008, 0x2000)]
+        key = ("k1", 1, 2, "clk", "pc", None, "rising", None, "mepc",
+               None, "v1")
+        path = _stream_cache_path(key)
+        self.assertTrue(path)
+        out = list(_write_stream_cache(iter(rows), path))
+        self.assertEqual(out, rows)                  # tee is transparent
+        back = list(_read_stream_cache(path))
+        self.assertEqual(back, rows)                 # incl. None epc
+        # a different key must map to a different file
+        key2 = key[:8] + ("OTHER",) + key[9:]
+        self.assertNotEqual(_stream_cache_path(key2), path)
+        os.unlink(path)
+
+    def test_two_column_stream(self):
+        from wavescope.waveform import (_read_stream_cache,
+                                        _write_stream_cache)
+        import tempfile as tf
+        path = os.path.join(tf.gettempdir(), "wavescope-cache",
+                            "test2col.wsc")
+        rows = [(0, 0x1000), (3, 0x1004)]
+        list(_write_stream_cache(iter(rows), path))
+        self.assertEqual(list(_read_stream_cache(path)), rows)
+        os.unlink(path)

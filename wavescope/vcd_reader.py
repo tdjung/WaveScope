@@ -357,25 +357,69 @@ def iter_commit_changes(path: str, pc_name: str,
         cur_valid: Optional[int] = 1 if valid_id is None else None
         pend: List[int] = []       # pc values committed at timestamp t
 
+        # Fast-reject dispatch: a full-design dump (fst2vcd converts
+        # EVERY signal) is 95%+ lines we do not track.  The old path
+        # paid strip() + split() + int() per line; now untracked lines
+        # cost one or two C-level endswith calls and no allocation.
+        tracked = {pc_id} | set(aux_idx)
+        if valid_id is not None:
+            tracked.add(valid_id)
+        b_sfx = [(" " + i + "\n", i) for i in tracked] \
+            + [("\t" + i + "\n", i) for i in tracked] \
+            + [(" " + i + "\r\n", i) for i in tracked]
+        s_sfx = [(i + "\n", i) for i in tracked] \
+            + [(i + "\r\n", i) for i in tracked]
+
+        b_tuple = tuple(s for s, _ in b_sfx)
+        s_tuple = tuple(s for s, _ in s_sfx)
+        b_map = dict(b_sfx)     # not used for lookup; kept for clarity
+
         for raw in f:
-            line = raw.strip()
-            if not line:
-                continue
-            c0 = line[0]
-            if c0 == "#":
-                if pend:           # timestamp advances: aux is now final
+            c0 = raw[0] if raw else "$"
+            if c0 == "b" or c0 == "B":
+                # untracked value lines (the vast majority of a
+                # full-design fst2vcd dump) cost exactly ONE C-level
+                # endswith(tuple) call and no allocation
+                if not raw.endswith(b_tuple):
+                    continue
+                ident = v = None
+                for sfx, sid in b_sfx:
+                    if raw.endswith(sfx):
+                        tok = raw[1:-len(sfx)].strip()
+                        ident = sid
+                        v = None if tok.strip("01") else int(tok, 2)
+                        break
+            elif c0 == "#":
+                if pend:           # timestamp advances: aux is final
                     snap = tuple(aux_cur)
-                    for v in pend:
-                        yield (t, v) + snap
+                    for pv in pend:
+                        yield (t, pv) + snap
                     pend = []
                 try:
-                    t = int(line[1:].split()[0])
+                    t = int(raw[1:].split()[0])
                 except (ValueError, IndexError):
                     pass
                 continue
-            if c0 == "$":
-                continue
-            ident, v = _parse_value_line(c0, line)
+            elif c0 in "01xXzZ":
+                if not raw.endswith(s_tuple):
+                    continue
+                ident = v = None
+                for sfx, sid in s_sfx:
+                    if raw.endswith(sfx) and len(raw) == 1 + len(sfx) \
+                            and raw[1:1 + len(sid)] == sid:
+                        ident = sid
+                        v = None if c0 in "xXzZ" else int(c0)
+                        break
+                if ident is None:
+                    continue
+            else:
+                # dialect fallback: leading whitespace, $-directives
+                line = raw.strip()
+                if not line or line[0] in "#$":
+                    continue
+                ident, v = _parse_value_line(line[0], line)
+                if ident is None or ident not in tracked:
+                    continue
             if ident is None:
                 continue
             if ident == pc_id:
@@ -387,7 +431,7 @@ def iter_commit_changes(path: str, pc_name: str,
                 aux_cur[aux_idx[ident]] = v
             elif valid_id is not None and ident == valid_id:
                 if v == 1 and cur_valid != 1 and cur_pc is not None:
-                    pend.append(cur_pc)   # rising valid re-commits current PC
+                    pend.append(cur_pc)   # rising valid re-commits PC
                 cur_valid = v
         if pend:
             snap = tuple(aux_cur)

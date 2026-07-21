@@ -1,7 +1,7 @@
 # WaveScope — Project Notes (대화 인수인계용)
 
 > 새 대화 시작 시: 이 파일과 README.md를 먼저 읽고 이어서 작업.
-> 마지막 업데이트: 2026-07-18, v0.17.0
+> 마지막 업데이트: 2026-07-18, v0.18.0
 
 ## 1. 프로젝트 개요
 
@@ -277,6 +277,25 @@ isr-exit/stack-saturated — 이슈 6.1용), `isr enter/exit`(clamp 표시),
 `unmatched-ret`, `flow-anomaly`. 끝에 함수별 self 합계 + incoming arc
 전수(개수·inclusive)와 incl/self 비율 summary. 사용자에게 시뮬레이터
 로그와 같은 함수 구간을 나란히 받아 대조하는 워크플로 제안할 것.
+
+## 6e. v0.18.0 — reader 병목 (사용자 실측: reading 550.4s vs engine 9.6s)
+사용자 파이프라인 = FST → fst2vcd 전체 변환 → 전 신호가 담긴 거대 VCD를
+파싱 (추적 신호는 2~3개, 나머지 95%+ 라인은 skip). 대응 3종:
+1. **skip 경로 재작성** (iter_commit_changes): 미추적 라인이 strip+
+   split+int 파싱을 타던 것을 → 무할당 endswith(튜플) 1회로 기각
+   (인라인 루프). 노이즈 dump 벤치 19→127 MB/s (**6.5배**).
+   사용자 550s → 85~120s 예상. CR/LF·탭·선행공백 방언은 fallback 유지.
+2. **추출 스트림 캐시** (waveform.py _stream_cache_*): 첫 pass에서
+   (tick,pc,epc)를 바이너리(.wsc, tempdir/wavescope-cache/, 키=파일
+   size+mtime+신호명+모드)로 tee 기록, 이후 실행·--engine both 2차
+   pass는 재파싱 없이 replay (읽기 7.6M samples/s — 80M도 ~10초).
+   --no-stream-cache로 비활성. 출력 동일성 검증 완료 (cmd: 라인 제외
+   byte-identical). 원자적 rename, 미완주 시 tmp 폐기.
+3. --timing에 open/convert 시간 분리 표시 (fst2vcd 변환이 여기 잡힘 —
+   변환 캐시가 안 먹는지 다음 회신에서 확인 가능).
+근본 조언 (사용자에게 전달): C++ 시뮬레이터가 FST를 만들 때 **pc/epc/
+clock만 dump**하도록 제한하면 변환·파싱 모두 수십 배 절감 — 소스에서
+줄이는 게 최선.
 
 ## 6d. v0.17.0 — 사용자 3차 리포트 대응 (sim/legacy 공통 inclusive 불일치)
 1. 속도: --timing (reader vs engine 분리 측정 + 2M 샘플마다 heartbeat).

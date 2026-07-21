@@ -4,8 +4,11 @@
     prepare_for_scan(...) -> a VCD path usable by scan (converting if needed)
 """
 
+import hashlib
 import os
+import struct
 import sys
+import tempfile
 from typing import Iterator, List, Optional, Tuple
 
 from . import fsdb as fsdb_mod
@@ -81,7 +84,28 @@ def open_pc_stream(path: str, clock: Optional[str], pc: str,
                    cfg: Optional[WaveConfig] = None,
                    epc: Optional[str] = None,
                    clock_counter: Optional[bool] = None,
+                   stream_cache: bool = True,
                    ) -> Iterator[Tuple]:
+    if stream_cache:
+        key = _stream_cache_key(path, clock, pc, valid, sample_edge,
+                                clock_period, epc, clock_counter)
+        cpath = _stream_cache_path(key) if key else ""
+        if cpath and os.path.exists(cpath):
+            cached = _read_stream_cache(cpath)
+            if cached is not None:
+                print(f"[wavescope] stream cache HIT: {cpath} "
+                      f"(replaying extracted samples; delete the file or "
+                      f"pass --no-stream-cache to re-extract)",
+                      file=sys.stderr)
+                return cached
+        inner = open_pc_stream(path, clock, pc, valid=valid,
+                               sample_edge=sample_edge,
+                               clock_period=clock_period, cfg=cfg,
+                               epc=epc, clock_counter=clock_counter,
+                               stream_cache=False)
+        if cpath:
+            return _write_stream_cache(inner, cpath)
+        return inner
     """Yield (tick, pc) samples -- or (tick, pc, epc_value) when an epc
     signal name is given (epc rides along as the CSR value in effect at
     each commit; the profiler uses it for exact ISR entry/exit)."""
@@ -182,7 +206,8 @@ def open_pc_stream(path: str, clock: Optional[str], pc: str,
         return open_pc_stream(vcd, clock, pc, valid=valid,
                               sample_edge=sample_edge,
                               clock_period=clock_period, cfg=cfg, epc=epc,
-                              clock_counter=clock_counter)
+                              clock_counter=clock_counter,
+                              stream_cache=False)
     raise fsdb_mod.FsdbError(_no_tools_msg(tools))
 
 
@@ -228,3 +253,110 @@ def prepare_for_scan(path: str, cfg: Optional[WaveConfig] = None) -> str:
                                    scope=cfg.fsdb_scope,
                                    extra_args=cfg.fsdb2vcd_args,
                                       reconvert=cfg.reconvert)
+
+
+# ----------------------------------------------------------------------
+# extracted-stream cache: the first pass over a huge (converted) dump
+# writes the commit samples to a compact binary file; every later pass
+# -- reruns, --engine both's second pass, parameter tweaks that don't
+# change the extraction -- replays it in seconds instead of re-parsing
+# gigabytes of full-design VCD text.
+# ----------------------------------------------------------------------
+
+_WSC_MAGIC = b"WSC1"
+_WSC_SENT = (1 << 64) - 1
+
+
+def _stream_cache_path(key_parts) -> str:
+    h = hashlib.sha1("\x00".join(str(k) for k in key_parts)
+                     .encode()).hexdigest()
+    d = os.path.join(tempfile.gettempdir(), "wavescope-cache")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        return ""
+    return os.path.join(d, h + ".wsc")
+
+
+def _stream_cache_key(path, clock, pc, valid, edge, period, epc, counter):
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (os.path.abspath(path), st.st_size, int(st.st_mtime),
+            clock, pc, valid, edge, period, epc, counter, "v1")
+
+
+def _read_stream_cache(cpath: str) -> Optional[Iterator[Tuple]]:
+    try:
+        f = open(cpath, "rb")
+        if f.read(4) != _WSC_MAGIC:
+            f.close()
+            return None
+        ncols = f.read(1)[0]
+    except (OSError, IndexError):
+        return None
+
+    def gen():
+        fmt = "<" + "Q" * ncols
+        try:
+            while True:
+                chunk = f.read(8 * ncols * 65536)
+                if not chunk:
+                    break
+                for row in struct.iter_unpack(fmt, chunk):
+                    if ncols == 3:
+                        e = row[2]
+                        yield (row[0], row[1],
+                               None if e == _WSC_SENT else e)
+                    else:
+                        yield row
+        finally:
+            f.close()
+    return gen()
+
+
+def _write_stream_cache(stream: Iterator[Tuple], cpath: str
+                        ) -> Iterator[Tuple]:
+    tmp = cpath + ".tmp"
+    try:
+        out = open(tmp, "wb")
+    except OSError:
+        for s in stream:
+            yield s
+        return
+    buf = bytearray()
+    ncols = None
+    ok = False
+    try:
+        for s in stream:
+            if ncols is None:
+                ncols = 3 if len(s) >= 3 else 2
+                out.write(_WSC_MAGIC + bytes([ncols]))
+            if ncols == 3:
+                e = s[2] if len(s) > 2 and s[2] is not None else _WSC_SENT
+                buf += struct.pack("<QQQ", s[0], s[1], e)
+            else:
+                buf += struct.pack("<QQ", s[0], s[1])
+            if len(buf) >= (1 << 20):
+                out.write(buf)
+                del buf[:]
+            yield s
+        if ncols is None:                 # empty stream: still valid
+            out.write(_WSC_MAGIC + bytes([2]))
+        out.write(buf)
+        ok = True
+    finally:
+        out.close()
+        if ok:
+            try:
+                os.replace(tmp, cpath)
+                print(f"[wavescope] stream cache written: {cpath}",
+                      file=sys.stderr)
+            except OSError:
+                pass
+        else:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass

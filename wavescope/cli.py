@@ -258,9 +258,13 @@ def cmd_profile(args) -> int:
                               valid=args.valid, sample_edge=args.edge,
                               clock_period=args.clock_period,
                               cfg=_wave_cfg(args), epc=isr_sig,
-                              clock_counter=args.clock_counter)
+                              clock_counter=args.clock_counter,
+                              stream_cache=not args.no_stream_cache)
 
+    import time as _time0
+    _open_t0 = _time0.perf_counter()
     samples = make_stream()
+    _open_dt = _time0.perf_counter() - _open_t0
     reader_timer = None
     if args.timing:
         import time as _time
@@ -397,9 +401,10 @@ def cmd_profile(args) -> int:
     if args.timing and reader_timer is not None:
         rt, n = reader_timer.t, reader_timer.n
         et = _t_engine - rt
-        print(f"[wavescope] timing: {n} samples | waveform reading "
+        print(f"[wavescope] timing: {n} samples | open/convert "
+              f"{_open_dt:.1f}s | waveform reading "
               f"{rt:.1f}s ({n / max(rt, 1e-9):.0f}/s) | profiling engine "
-              f"{et:.1f}s | total {_t_engine:.1f}s"
+              f"{et:.1f}s | total {_open_dt + _t_engine:.1f}s"
               + (" (NOTE: --engine both runs a second full pass)"
                  if args.engine == "both" else ""), file=sys.stderr)
 
@@ -661,6 +666,12 @@ def main(argv=None) -> int:
     pp.add_argument("--no-demangle", action="store_true",
                     help="keep mangled C++/Rust symbol names "
                          "(default: demangle via objdump -C)")
+    pp.add_argument("--no-stream-cache", action="store_true",
+                    help="disable the extracted-sample cache (by default "
+                         "the first pass writes (tick,pc,epc) samples to "
+                         "a compact binary in the temp dir; reruns and "
+                         "--engine both's second pass replay it in "
+                         "seconds instead of re-parsing the waveform)")
     pp.add_argument("--timing", action="store_true",
                     help="report where time goes: waveform reading vs "
                          "profiling engine (adds ~100ns/sample overhead) "
