@@ -477,6 +477,16 @@ def cmd_profile(args) -> int:
     if prof.healed_returns or prof.unmatched_returns:
         print(f"[wavescope] returns: {prof.healed_returns} healed, "
               f"{prof.unmatched_returns} unmatched", file=sys.stderr)
+    if getattr(prof, "guarded_unwinds", 0):
+        det = ""
+        if getattr(prof, "return_guards", None) is not None:
+            det = (f" (sim A5: {prof.return_guards} skipped pops, "
+                   f"{prof.chain_guards} stopped tail-chains)")
+        print(f"[wavescope] {prof.guarded_unwinds} unwinds stopped by the "
+              f"landing guard -- pops that would have closed a frame the "
+              f"landing pc was still inside{det}; each is an 'unwind-guard'/"
+              f"'return-guard'/'chain-guard' event under --debug-roots",
+              file=sys.stderr)
     if args.check_inclusive:
         from .profiler import inclusive_consistency
         rows, roots = inclusive_consistency(prof, binary)

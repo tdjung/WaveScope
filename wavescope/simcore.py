@@ -168,6 +168,9 @@ class SimProfiler(object):
         self.n_isr_exits = 0
         self.max_exit_drain = 0
         self.n_spurious = 0
+        self.n_return_guard = 0    # A5a: RETURN pops skipped (landing
+                                   # still inside the top frame's callee)
+        self.n_chain_guard = 0     # A5b: tail-chain pops stopped early
         self.dropped_unknown_pc = 0
 
     def _root(self, kind, cp, callee, info, depth):
@@ -428,8 +431,29 @@ class SimProfiler(object):
 
         elif self.branchType == BT_RETURN:
             if self.call_stack:
-                self._root("pop", self.call_stack[-1].caller_pc,
-                           self.call_stack[-1].callee_pc,
+                top = self.call_stack[-1]
+                # ADAPTER A5a (NOT in the reference): a return can never
+                # land INSIDE the function whose frame it closes -- the
+                # only architectural way is self-recursion (callee ==
+                # caller, exempted).  The reference pops top blindly, so
+                # a MISSING intermediate frame (helper swallowed by a
+                # missed ISR entry, untracked entry, ...) makes it pop
+                # the ENCLOSING function's frame while that function is
+                # still running: the t=145-style early pop that seeds
+                # the whole depth collapse.  Skip and count instead.
+                if (to_info is not None
+                        and to_func == top.callee_func
+                        and top.callee_func != top.caller_func
+                        and from_func != to_func):
+                    self.n_return_guard += 1
+                    self._root("return-guard", top.caller_pc,
+                               top.callee_pc,
+                               f"RETURN landing 0x{cur_pc:x} is inside "
+                               f"this frame's callee -- pop skipped "
+                               f"(A5a, frame kept open)",
+                               len(self.call_stack))
+                    return
+                self._root("pop", top.caller_pc, top.callee_pc,
                            f"RETURN landing 0x{cur_pc:x}",
                            len(self.call_stack))
                 entry = self.call_stack.pop()
@@ -438,9 +462,32 @@ class SimProfiler(object):
                     call_info.inclusive[i] += (
                         self.accumulated_events[i] -
                         entry.events_at_entry[i])
+                # ADAPTER A5b (NOT in the reference): the tail-chain
+                # while must never pop a frame whose CALLEE the landing
+                # pc is still inside -- the flow is demonstrably
+                # executing that frame's callee, so the "return through
+                # the chain" reading is disproven at that frame.  With
+                # an upstream frame already lost, the reference pops
+                # straight through here: exactly how one lost
+                # SYS_initialize frame let restore's `jr t0` (landing
+                # INSIDE SYS_system_startup) pop (BSP_reset->startup)
+                # and (_start->BSP_reset), emptying the root chain and
+                # restarting the stack at depth 1.  Stale non-tail
+                # frames are still late-flushed as in the reference
+                # (the documented jal-ra-restore quirk is untouched).
                 while entry.is_tail_call and self.call_stack:
-                    self._root("pop", self.call_stack[-1].caller_pc,
-                               self.call_stack[-1].callee_pc,
+                    nxt = self.call_stack[-1]
+                    if to_info is not None and nxt.callee_func == to_func:
+                        self.n_chain_guard += 1
+                        self._root("chain-guard", nxt.caller_pc,
+                                   nxt.callee_pc,
+                                   f"tail-chain stopped: landing "
+                                   f"0x{cur_pc:x} is inside this "
+                                   f"frame's callee (A5b, frame kept "
+                                   f"open)",
+                                   len(self.call_stack))
+                        break
+                    self._root("pop", nxt.caller_pc, nxt.callee_pc,
                                "tail-chain pop (RETURN through tail)",
                                len(self.call_stack))
                     entry = self.call_stack.pop()
@@ -642,6 +689,9 @@ def _to_profile(p: SimProfiler, binary: BinaryInfo, epc_seen: bool) -> Profile:
     prof.root_log = p.root_log
     prof.isr_exits = p.n_isr_exits
     prof.max_exit_drain = p.max_exit_drain
+    prof.guarded_unwinds = p.n_return_guard + p.n_chain_guard
+    prof.return_guards = p.n_return_guard
+    prof.chain_guards = p.n_chain_guard
     return prof
 
 

@@ -143,6 +143,9 @@ class Profile:
         self.spurious_epc = 0        # same-function mepc changes suppressed
         self.flow_anomalies = 0      # unexplained discontinuities (epc mode)
         self.orphan_xrets = 0        # xret committed with no ISR context
+        self.guarded_unwinds = 0     # unwinds stopped by the landing floor
+                                     # (v0.20.3: pops that would have closed
+                                     # a frame the landing pc is still inside)
         self.isr_open = 0            # ISR contexts alive at end of trace
 
     def _update(self, pc: int, ev: int, n: int, stack: List[FrameCtx]) -> None:
@@ -289,6 +292,52 @@ def _unwind_to(prof: Profile, stack: List[FrameCtx], depth: int,
     while len(stack) > depth:
         _flush_call(prof, stack, len(stack) - 1, why)
         stack.pop()
+
+
+def _landing_floor(stack: List[FrameCtx], land_f, upto=None) -> int:
+    """v0.20.3 landing floor: an unwind driven by a transfer that LANDS
+    at pc L must never pop a frame whose callee function CONTAINS L --
+    we are demonstrably still executing inside that frame's callee, so
+    closing it (and everything above it was fine, but it and below is
+    not) mis-attributes the rest of the program.  This is what let one
+    early-lost frame cascade: the restore's `jr t0` landed INSIDE
+    SYS_system_startup, yet the tail-chain walk popped the
+    (BSP_reset -> startup) frame and then (_start -> BSP_reset),
+    emptying the root chain and restarting the stack at depth 1.
+
+    Returns the minimum depth the unwind may reach (index of the
+    protected frame + 1), or 0 when no frame contains the landing.
+    `upto` restricts the scan to frames strictly below a directly
+    evidenced match (its ret_addr equality outranks the floor, which
+    also keeps self-recursion returns working)."""
+    if land_f is None:
+        return 0
+    n = len(stack) if upto is None else min(upto, len(stack))
+    for k in range(n - 1, -1, -1):
+        if stack[k].callee_start == land_f.start:
+            return k + 1
+    return 0
+
+
+def _floor_guard(prof: Profile, stack: List[FrameCtx], target: int,
+                 land_f, land_pc: int, why: str, upto=None) -> int:
+    """Apply the landing floor to an unwind target; count + log when it
+    actually bites so the user's --debug-roots run shows exactly which
+    frame was protected and from what."""
+    floor = _landing_floor(stack, land_f, upto)
+    if floor > target:
+        prof.guarded_unwinds += 1
+        fr = stack[floor - 1]
+        if prof.root_log is not None:
+            _root_ev(prof, "unwind-guard", fr.call_pc, fr.callee_start,
+                     f"{why}: landing 0x{land_pc:x} is inside this "
+                     f"frame's callee -- unwind stopped above it "
+                     f"(would have reached depth {target})", floor)
+        if prof.debug is not None:
+            prof.debug.note(f"unwind-guard [{why}] landing "
+                            f"0x{land_pc:x} floor {target}->{floor}")
+        return floor
+    return target
 
 
 def _close_loop_if_reentry(prof: Profile, stack: List[FrameCtx],
@@ -484,11 +533,21 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
                              "missed ISR entry: xret with no open epc "
                              "context (stack untouched)", len(stack))
                 return
+            land_f = fmap.get(cur_pc, _MISS)
+            if land_f is _MISS:
+                land_f = binary.func_at(cur_pc)
+                fmap[cur_pc] = land_f
             for i in range(len(stack) - 1, -1, -1):
                 if stack[i].ret_addr == cur_pc:
                     j = i
                     while j > 0 and stack[j].is_tail:
                         j -= 1
+                    # v0.20.3: the matched frame i is evidenced by its
+                    # ret_addr (self-recursion included); the tail walk
+                    # BELOW it is heuristic -- never let it descend past
+                    # a frame whose callee still contains the landing
+                    j = _floor_guard(prof, stack, j, land_f, cur_pc,
+                                     "ret-match walk", upto=i)
                     _unwind_to(prof, stack, j,
                                f"ret-match {p.insn.mnemonic}@0x{p.pc:x} "
                                f"-> 0x{cur_pc:x}")
@@ -502,7 +561,10 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
             # never commits, so its 6-insn/14-cycle body -- and
             # everything after -- stays out of the arc until the
             # end-of-trace drain poisons it.
-            if cur_func is not None and cur_func in helper_funcs:
+            if cur_func is not None and cur_func in helper_funcs \
+                    and (land_f is None or land_f not in helper_funcs):
+                # (landing still inside a helper = the restore/save
+                # chain is continuing, not returning -- v0.20.3)
                 popped = False
                 while stack and stack[-1].callee_start is not None \
                         and stack[-1].callee_start in helper_starts:
@@ -516,7 +578,7 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
                 # returning INTO the function that called some stacked
                 # frame, unwind to it; otherwise stale frames accumulate
                 # the rest of the program into their inclusive costs.
-                nf = binary.func_at(cur_pc)
+                nf = land_f
                 if nf is not None:
                     for i in range(len(stack) - 1, -1, -1):
                         cp = stack[i].call_pc
@@ -524,6 +586,11 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
                             j = i
                             while j > 0 and stack[j].is_tail:
                                 j -= 1
+                            # v0.20.3: healing is inference, not
+                            # evidence -- it must not close any frame
+                            # whose callee the landing is still inside
+                            j = _floor_guard(prof, stack, j, nf, cur_pc,
+                                             "heal")
                             _unwind_to(prof, stack, j,
                                        f"heal ret@0x{p.pc:x}->0x{cur_pc:x}")
                             for c in isr_ctxs:
@@ -641,9 +708,11 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
                     popped = None
                     while isr_ctxs and isr_ctxs[-1].kind == "lvl" and                             isr_ctxs[-1].level != lvl:
                         popped = isr_ctxs.pop()
-                        _unwind_to(prof, stack,
-                                   min(popped.depth, len(stack)),
-                                   "isr-exit(level)")
+                        tgt = min(popped.depth, len(stack))
+                        tgt = _floor_guard(prof, stack, tgt,
+                                           binary.func_at(pc), pc,
+                                           "isr-exit(level)")
+                        _unwind_to(prof, stack, tgt, "isr-exit(level)")
                     if popped is not None:
                         pending = popped.saved
                         if dbg is not None:
@@ -773,8 +842,14 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
                         _root_ev(prof, "isr-exit", pc, None,
                                  f"resume, unwound to depth {ctx.depth}",
                                  len(stack))
-                    _unwind_to(prof, stack, min(ctx.depth, len(stack)),
-                               "isr-exit(epc)")
+                    tgt = min(ctx.depth, len(stack))
+                    # v0.20.3: a stale/bogus ctx (missed exit, rewritten
+                    # mepc) can carry a depth far below the live stack;
+                    # the resume pc pins which frames must stay open
+                    tgt = _floor_guard(prof, stack, tgt,
+                                       binary.func_at(pc), pc,
+                                       "isr-exit(epc)")
+                    _unwind_to(prof, stack, tgt, "isr-exit(epc)")
                     pending = ctx.saved          # discard the xret pending;
                     epc_suppressed = False       # resolve the interrupted one
                     prev_epc = isr_ctxs[-1].resume if isr_ctxs else ctx.resume
@@ -788,8 +863,11 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
                         (pending.cls.is_return and ctx.resume is not None
                          and pc == ctx.resume):
                     isr_ctxs.pop()
-                    _unwind_to(prof, stack, min(ctx.depth, len(stack)),
-                               "isr-exit(heur)")
+                    tgt = min(ctx.depth, len(stack))
+                    tgt = _floor_guard(prof, stack, tgt,
+                                       binary.func_at(pc), pc,
+                                       "isr-exit(heur)")
+                    _unwind_to(prof, stack, tgt, "isr-exit(heur)")
                     pending = None
                     if dbg is not None:
                         dbg.note(f"isr exit(heur) at 0x{pc:x} "

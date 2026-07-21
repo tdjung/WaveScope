@@ -1,7 +1,7 @@
 # WaveScope — Project Notes (대화 인수인계용)
 
 > 새 대화 시작 시: 이 파일과 README.md를 먼저 읽고 이어서 작업.
-> 마지막 업데이트: 2026-07-19, v0.20.2
+> 마지막 업데이트: 2026-07-21, v0.20.3
 
 ## 1. 프로젝트 개요
 
@@ -277,6 +277,82 @@ isr-exit/stack-saturated — 이슈 6.1용), `isr enter/exit`(clamp 표시),
 `unmatched-ret`, `flow-anomaly`. 끝에 함수별 self 합계 + incoming arc
 전수(개수·inclusive)와 incl/self 비율 summary. 사용자에게 시뮬레이터
 로그와 같은 함수 구간을 나란히 받아 대조하는 워크플로 제안할 것.
+
+## 6j. v0.20.3 — ★★ 다음 세션 최우선: landing guard (depth 붕괴의 후폭풍 차단, 사용자 재실행 대기)
+
+### 사용자 신규 단서 (2026-07-21 메시지)
+
+- __riscv_restore_0 / __riscv_restore_4 **둘 다 마지막이 `jr t0`** (restore_0의
+  직전 insn "sw ra,12(sp)"?, restore_4는 "sub sp,sp,t1" — 전자는 사실 libgcc
+  save 계열 몸체와 동일한 형태. 사용자 오타이거나 벤더 커스텀 millicode).
+  둘의 마지막 insn이 동일한데 한쪽만 스택이 관통됨 → **분류 차이가 아니라
+  스택 상태 의존적 cascade**라는 결정적 증거 (엔진에서 두 helper는 완전히
+  동일하게 처리됨을 코드로 확인).
+- t=154에서 pop d3(restore)→d2(BSP→startup)→d1(_start→BSP) 3연쇄 후
+  t=158 push depth=1 재시작 = 6i 재구성과 정합.
+
+### 원인 구조 (이번 세션에서 합성으로 재현·확정)
+
+깨끗한 trace에선 모든 컨벤션(j / jal ra / jal t0 에필로그, 2단 tail,
+missed-ISR 다수 조합)에서 양 엔진 모두 균형 → t=145의 조기 pop(병소)은
+비정상 이벤트이고, 관찰된 붕괴는 그 **기계적 후폭풍**이 맞음. 후폭풍의
+정확한 기전을 재현함: 함수 frame이 하나 없어진 상태(예: v0.20.2 parity로
+**교차 함수 cond branch 진입 = frame 없음** — beqz→SYS_init 류!)에서
+에필로그 restore가 (BSP→startup) 위에 직접 tail-push되고, `jr t0`의
+착지가 **startup 내부**인데도 레퍼런스 tail-chain while이 (BSP→startup),
+(_start→BSP)를 관통 pop → 스택 공동화 → depth=1 재시작. 착지 pc가
+스택과 모순됨을 엔진이 알면서도 무시하던 것이 본질.
+
+### v0.20.3 수정 = landing guard (양 엔진)
+
+원칙 2개: ① return은 자신이 닫는 frame의 callee **내부에 착지할 수 없다**
+(자기재귀 caller==callee만 예외) ② 어떤 unwind도 **착지 pc를 아직 포함하고
+있는 callee의 frame을 pop할 수 없다** (landing floor).
+
+- legacy: ret-match의 tail walk-down에 floor (매칭 frame 자체는 ret_addr
+  증거이므로 예외 — 재귀 안전), heal에 floor, isr-exit(epc/heur/level)
+  unwind에 floor (stale ctx가 낮은 depth로 하부를 날리는 6h(A) 방어),
+  helper-ret-pop은 착지가 다른 helper면 skip (restore 체인 중간 오폐쇄
+  방지). 카운터 prof.guarded_unwinds + --debug-roots "unwind-guard" 이벤트
+  (어떤 frame이 보호됐고 원래 몇 depth까지 내려갈 뻔했는지 명시).
+- sim: **ADAPTER A5** (레퍼런스 이탈, 주석 명기) — A5a: BT_RETURN top pop을
+  착지가 top.callee 내부면 skip ("return-guard" 이벤트, helper frame 소실
+  시 감싸는 함수 frame이 날아가던 t=145 후보 (d) 차단). A5b: tail-chain
+  while에서 다음 frame의 callee가 착지를 포함하면 중단 ("chain-guard").
+  주의: 레퍼런스의 stale non-tail late-flush quirk(6c의 jal-ra-restore
+  의미론)은 **그대로 보존** — claimed-caller 검사까지 넣었다가 parity
+  테스트(test_jal_restore_late_flush)가 깨져서 callee-포함 검사만 남김.
+  counters: prof.return_guards/chain_guards (stderr 라인 + both diff에서
+  사용자 시뮬레이터와의 발산 가시화용).
+- 재현 고정: tests/test_v0203.py 6종 — 사용자 로그의 붕괴 시나리오
+  (frameless 진입 + tail restore + jr t0)에서 양 엔진 모두 _start
+  inclusive == total−self(_start), First push가 depth 3 "under startup",
+  sim chain-guard 발화; A5a helper-frame-소실; 자기재귀 pop 정상; legacy
+  restore 체인 hop; stale isr-exit floor. 전체 174 테스트 통과.
+
+### 사용자 회신 요청 (이 순서로)
+
+1. v0.20.3 재실행: **_start가 root 최상위 + inclusive 최대**가 되는지
+   (붕괴가 t=145 원인과 무관하게 이제 격리됨), --check-inclusive 델타 변화.
+2. stderr의 "N unwinds stopped by the landing guard" 수치 + --debug-roots의
+   unwind-guard/return-guard/chain-guard 이벤트 라인 (t=154 지점이
+   chain-guard로 바뀌었는지 = 기전 확정).
+3. **t=145 pop 라인의 [ ... ] 사유 문자열** — 지난 회신에서 생략됨. 이게
+   병소의 최종 판정 데이터 (ret-match .. -> 0x착지 / helper-ret-pop /
+   isr-exit / RETURN landing 0x..).
+4. t=47/147/158의 "SYS_initi...", "SYS_initial...", "SYS_initializ..."가
+   같은 함수인지 (6i 질문 유지).
+5. isr-enter/isr-exit/orphan-xrets/tail-noframe/guard 카운트 전체.
+
+### 유의 (사용자에게 설명할 것)
+
+- A5는 레퍼런스 이탈이므로, 사용자 시뮬레이터가 레퍼런스처럼 스택을
+  관통한다면 그 지점에서 sim/시뮬레이터 수치가 **의도적으로** 달라짐 —
+  guard 이벤트가 그 지점을 정확히 지목하므로 오히려 시뮬레이터 쪽 버그
+  후보 리스트가 됨 (사용자 코드에 같은 가드를 이식 제안 가능).
+- t=145의 근본 원인은 아직 미확정 (사유 문자열 대기). guard는 원인과
+  무관하게 피해를 국소화하는 방어층. 원인이 확정되면 그 지점 자체를
+  추가 수정.
 
 ## 6i. v0.20.2 — ★ 다음 세션 최우선 (depth 붕괴 본선, 사용자 새 채팅 예고)
 
