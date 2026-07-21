@@ -208,13 +208,13 @@ class TestSimRootLog(unittest.TestCase):
     def test_empty_stack_tail_recorded(self):
         tr = [(0, 0x1008), (1, 0x100c)] + \
              [(2 + i, pc) for i, pc in enumerate(REST)]
-        prof = run_sim(iter(tr), milli_binary(), CL, trace_roots=True)
+        prof = run_sim(iter(tr), milli_binary(), CL, trace_roots=3)
         kinds = [e[1] for e in prof.root_log["ev"]]
         self.assertIn("tail-noframe", kinds)
 
     def test_push_pop_events(self):
         prof = run_sim(iter(full_trace()), milli_binary(), CL,
-                       trace_roots=True)
+                       trace_roots=3)
         kinds = prof.root_log["n"]
         self.assertGreater(kinds.get("push", 0), 0)
         self.assertGreater(kinds.get("pop", 0), 0)

@@ -1,7 +1,7 @@
 # WaveScope — Project Notes (대화 인수인계용)
 
 > 새 대화 시작 시: 이 파일과 README.md를 먼저 읽고 이어서 작업.
-> 마지막 업데이트: 2026-07-19, v0.20.0
+> 마지막 업데이트: 2026-07-19, v0.20.1
 
 ## 1. 프로젝트 개요
 
@@ -277,6 +277,34 @@ isr-exit/stack-saturated — 이슈 6.1용), `isr enter/exit`(clamp 표시),
 `unmatched-ret`, `flow-anomaly`. 끝에 함수별 self 합계 + incoming arc
 전수(개수·inclusive)와 incl/self 비율 summary. 사용자에게 시뮬레이터
 로그와 같은 함수 구간을 나란히 받아 대조하는 워크플로 제안할 것.
+
+## 6h. v0.20.1 — --debug-roots 계측 자체의 버그 수정 (사용자 로그 분석)
+사용자가 본 "이상"의 상당수가 계측 문제였음:
+- legacy pop 라벨이 0-기반 idx (push는 1-기반) → "t=28 push depth=3 /
+  t=35 pop depth=2"가 같은 frame. → 1-기반 통일.
+- depth≤3 창 밖 이벤트 무기록 → "t=49 이후 save_0 call 소실"은 로그
+  창 문제 (엔진은 정상 pop; t=145 pop = SYS_init의 정상 복귀).
+  → --debug-roots [N] 으로 창 조절 (기본 3).
+- sim은 push 무필터·pop만 ≤3 필터 (비대칭) → save_0 pop이 안 보였음.
+  → 대칭화.
+- sim tail-chain while의 연쇄 pop 미로깅 → "pop 없이 depth 2 감소"
+  착시. → 각 pop을 "tail-chain pop"으로 기록.
+- 이벤트 상한 40 → 바쁜 구간에서 후반 pop 통째 생략 → 상한 200 +
+  생략 카운트 표기.
+남은 진짜 버그 후보 (다음 회신으로 판별):
+(A) sim depth 붕괴 (t=158 push depth=1, t=340 tail-noframe depth=0):
+    유력 기전 = **stale ISR level** — exit 조건이 pc==저장된 epc 정확
+    일치인데, 소프트웨어가 mret 전 mepc를 바꾸면(스케줄러류) exit을
+    영영 놓치고 is_isr 고착 → 이후 그 pc가 재등장하는 순간 reference의
+    exit 분기가 **현재 call_stack 전량 drain**. 계측 추가: isr-exit에
+    "drained N open frames" + N≥3이면 SUSPICIOUS 표기 + 종료 시 경고,
+    prof.isr_exits/max_exit_drain. 레퍼런스/사용자 시뮬레이터 공통 위험.
+(B) tail-chain 완전 unwind: startup 체인이 전부 tail이면 restore ret
+    1회에 앵커까지 전부 pop = 레퍼런스 의미론상 정상일 수 있음 —
+    이제 "tail-chain pop" 연쇄로 로그에서 구분됨.
+legacy "ISR이 root": handler가 root인 것 자체는 설계상 정상 (caller
+arc 없음, 사용자도 동의했던 사항) — 문제는 handler가 일반 call로
+push되는 잔존 케이스 → isr-enter(handler-entry) 카운트와 대조 요청.
 
 ## 6g. v0.20.0 — 사용자 5개 항목 (사용량 초과로 중단 후 재개분)
 1. jcnd **내림차순** 정정 (v0.17의 오름차순은 오해였음): 18/27 → 9/27,

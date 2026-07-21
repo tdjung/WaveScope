@@ -165,6 +165,8 @@ class SimProfiler(object):
         self.root_log = None
         self.cur_tick = None
         self.n_isr_entries = 0
+        self.n_isr_exits = 0
+        self.max_exit_drain = 0
         self.n_spurious = 0
         self.dropped_unknown_pc = 0
 
@@ -172,10 +174,14 @@ class SimProfiler(object):
         log = self.root_log
         if log is None:
             return
+        if depth > log["depth"] and kind in ("push", "pop"):
+            return                     # symmetric window for push AND pop
         log["n"][kind] = log["n"].get(kind, 0) + 1
-        if len(log["ev"]) < 40:
+        if len(log["ev"]) < 200:
             log["ev"].append((self.cur_tick, kind, cp, callee, info,
                               depth, None))
+        else:
+            log["omitted"] = log.get("omitted", 0) + 1
 
     # -- QUIRK Q1: infos_[pc] with std::map operator[] semantics -------
     def _infos_bracket(self, pc: int) -> SimInfo:
@@ -248,6 +254,7 @@ class SimProfiler(object):
             self.prev_epc = top.epc
             self.epc_error_check = False
 
+            drained = len(self.call_stack)
             while self.call_stack:
                 entry = self.call_stack[-1]
                 call_info = self.calls[entry.caller_pc][entry.callee_pc]
@@ -257,8 +264,15 @@ class SimProfiler(object):
                         entry.events_at_entry[i])
                 self.call_stack.pop()
             self.isr_stack.pop()
-            self._root("isr-exit", base, None, "resume",
-                       len(self.call_stack))
+            self.n_isr_exits += 1
+            if drained > self.max_exit_drain:
+                self.max_exit_drain = drained
+            self._root("isr-exit", base, None,
+                       f"resume epc=0x{top.epc:x}, drained {drained} "
+                       f"open frames"
+                       + (" <-- SUSPICIOUS (stale ISR level?)"
+                          if drained >= 3 else ""),
+                       drained)
 
             if not self.isr_stack:
                 self.is_isr = False
@@ -411,11 +425,10 @@ class SimProfiler(object):
 
         elif self.branchType == BT_RETURN:
             if self.call_stack:
-                if len(self.call_stack) <= 3:
-                    top = self.call_stack[-1]
-                    self._root("pop", top.caller_pc, top.callee_pc,
-                               f"RETURN landing 0x{cur_pc:x}",
-                               len(self.call_stack))
+                self._root("pop", self.call_stack[-1].caller_pc,
+                           self.call_stack[-1].callee_pc,
+                           f"RETURN landing 0x{cur_pc:x}",
+                           len(self.call_stack))
                 entry = self.call_stack.pop()
                 call_info = self.calls[entry.caller_pc][entry.callee_pc]
                 for i in range(N_EVENTS):
@@ -423,6 +436,10 @@ class SimProfiler(object):
                         self.accumulated_events[i] -
                         entry.events_at_entry[i])
                 while entry.is_tail_call and self.call_stack:
+                    self._root("pop", self.call_stack[-1].caller_pc,
+                               self.call_stack[-1].callee_pc,
+                               "tail-chain pop (RETURN through tail)",
+                               len(self.call_stack))
                     entry = self.call_stack.pop()
                     tail_call = self.calls[entry.caller_pc][entry.callee_pc]
                     for i in range(N_EVENTS):
@@ -519,7 +536,7 @@ def _update_profile(p: SimProfiler, binary: BinaryInfo, classifier,
 
 
 def run_sim(pc_stream, binary: BinaryInfo, classifier,
-            trace_roots: bool = False) -> Profile:
+            trace_roots: int = 0) -> Profile:
     """Run the transcribed engine over (tick, pc[, epc]) samples and
     return a legacy-shaped Profile for the shared callgrind writer.
     (--no-isr-clamp is not supported: the reference has no such switch.)
@@ -527,7 +544,7 @@ def run_sim(pc_stream, binary: BinaryInfo, classifier,
     p = SimProfiler(binary)
     static_cache: Dict[int, Tuple] = {}
     if trace_roots:
-        p.root_log = {"n": {}, "ev": []}
+        p.root_log = {"n": {}, "ev": [], "depth": int(trace_roots)}
 
     prev: Optional[Tuple] = None              # (pc, epc, cyc_delta)
     last_fed = None                           # (cls, target, fallthrough)
@@ -620,6 +637,8 @@ def _to_profile(p: SimProfiler, binary: BinaryInfo, epc_seen: bool) -> Profile:
     prof.isr_open = len(p.isr_stack)
     prof.sim_dropped_unknown = p.dropped_unknown_pc
     prof.root_log = p.root_log
+    prof.isr_exits = p.n_isr_exits
+    prof.max_exit_drain = p.max_exit_drain
     return prof
 
 

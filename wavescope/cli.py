@@ -414,7 +414,10 @@ def cmd_profile(args) -> int:
                 print(f"[wavescope] root-frame events ({tag}): none",
                       file=sys.stderr)
             return
-        print(f"[wavescope] root-frame events ({tag}): "
+        print(f"[wavescope] root-frame events ({tag}, depth<="
+              f"{plog.get('depth', 3)}"
+              + (f", {plog['omitted']} deeper/later events omitted"
+                 if plog.get("omitted") else "") + "): "
               + ", ".join(f"{k}={v}" for k, v in sorted(plog["n"].items())),
               file=sys.stderr)
         def loc(a):
@@ -433,6 +436,12 @@ def cmd_profile(args) -> int:
                      getattr(prof, "root_log", None))
         if legacy_prof is not None:
             _print_roots("legacy", getattr(legacy_prof, "root_log", None))
+        if getattr(prof, "max_exit_drain", 0) >= 3:
+            print(f"[wavescope] sim: an ISR exit drained "
+                  f"{prof.max_exit_drain} open frames at once -- likely "
+                  f"a STALE ISR level firing at a recurring pc (missed "
+                  f"exit earlier: mepc rewritten by software before "
+                  f"mret?)", file=sys.stderr)
 
     if isr_sig and not prof.epc_mode:
         print(f"[wavescope] WARNING: {'--epc' if args.epc else '--isr-level'}"
@@ -684,12 +693,14 @@ def main(argv=None) -> int:
                     help="report where time goes: waveform reading vs "
                          "profiling engine (adds ~100ns/sample overhead) "
                          "with a progress heartbeat every 2M samples")
-    pp.add_argument("--debug-roots", action="store_true",
-                    help="log push/pop events of the BOTTOM call-stack "
-                         "frames (depth<=3) with reasons -- diagnoses "
-                         "root functions (_start & friends) whose "
-                         "inclusive comes out too small (early pops, "
-                         "empty-stack tail transfers)")
+    pp.add_argument("--debug-roots", nargs="?", const=3, default=0,
+                    type=int, metavar="DEPTH",
+                    help="log push/pop events of the bottom call-stack "
+                         "frames (default depth<=3; pass a number for a "
+                         "wider window, e.g. --debug-roots 6) with "
+                         "ticks, reasons, ISR enter/exit events and "
+                         "tail-chain pops -- diagnoses roots whose "
+                         "inclusive comes out too small")
     pp.add_argument("--engine", choices=("legacy", "sim", "both"),
                     default="legacy",
                     help="profiling engine: 'legacy' (WaveScope's "

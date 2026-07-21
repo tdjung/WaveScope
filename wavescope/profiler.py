@@ -256,8 +256,10 @@ class DebugTrace(object):
 def _root_ev(prof, kind, cp, callee, info, depth, cy=None):
     log = prof.root_log
     log["n"][kind] = log["n"].get(kind, 0) + 1
-    if len(log["ev"]) < 40:
+    if len(log["ev"]) < 200:
         log["ev"].append((prof.cur_tick, kind, cp, callee, info, depth, cy))
+    else:
+        log["omitted"] = log.get("omitted", 0) + 1
 
 
 def _flush_call(prof: Profile, stack: List[FrameCtx], idx: int,
@@ -274,8 +276,9 @@ def _flush_call(prof: Profile, stack: List[FrameCtx], idx: int,
     cs = prof.calls[(fr.call_pc, fr.callee_start)]
     for e in range(N_EVENTS):
         cs.inclusive[e] += fr.acc[e]
-    if prof.root_log is not None and idx <= 2:
-        _root_ev(prof, "pop", fr.call_pc, fr.callee_start, why, idx,
+    if prof.root_log is not None \
+            and idx + 1 <= prof.root_log["depth"]:
+        _root_ev(prof, "pop", fr.call_pc, fr.callee_start, why, idx + 1,
                  fr.acc[E_CY])
     if prof.debug is not None:
         prof.debug.pop(fr, cs, idx, why)
@@ -323,7 +326,8 @@ def _push_frame(prof: Profile, stack: List[FrameCtx],
         for c in isr_ctxs:
             c.depth = max(0, c.depth - 1)
     stack.append(frame)
-    if prof.root_log is not None and len(stack) <= 3:
+    if prof.root_log is not None \
+            and len(stack) <= prof.root_log["depth"]:
         _root_ev(prof, "push", frame.call_pc, frame.callee_start,
                  "TAIL" if frame.is_tail else "CALL", len(stack))
     if frame.call_pc is not None and frame.callee_start is not None:
@@ -360,7 +364,7 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
         debug: Optional[DebugTrace] = None,
         aux_mode: str = "epc",
         level_mask: Optional[int] = None,
-        trace_roots: bool = False) -> Profile:
+        trace_roots: int = 0) -> Profile:
     """Consume (tick, pc[, epc]) samples and build a Profile.
 
     Each new PC value is one committed instruction.  Its cycle cost is
@@ -388,7 +392,7 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
     fmap: Dict[int, object] = {}
     entry_set = frozenset(f.start for f in binary.funcs)
     if trace_roots:
-        prof.root_log = {"n": {}, "ev": []}
+        prof.root_log = {"n": {}, "ev": [], "depth": int(trace_roots)}
     # millicode helpers (simulator isCompilerHelper): -msave-restore
     # save/restore routines get special arc rules
     helper_funcs = {f for f in binary.funcs
