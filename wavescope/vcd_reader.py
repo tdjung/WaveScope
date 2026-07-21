@@ -233,7 +233,19 @@ def iter_pc_samples(path: str, clock_name: str, pc_name: str,
         tick = 0
         want_rise = sample_edge == "rising"
 
+        _trk = {clk_id, pc_id, valid_id}
+        _trk.discard(None)
+        _bt = tuple(" " + i + "\n" for i in _trk) \
+            + tuple("\t" + i + "\n" for i in _trk) \
+            + tuple(" " + i + "\r\n" for i in _trk)
+        _st = tuple(i + "\n" for i in _trk) + tuple(i + "\r\n" for i in _trk)
+
         for raw in f:
+            _c = raw[0] if raw else "$"
+            if (_c == "b" or _c == "B") and not raw.endswith(_bt):
+                continue          # untracked wide signal: 1 C call, no alloc
+            if _c in "01xXzZ" and not raw.endswith(_st):
+                continue          # untracked scalar signal
             line = raw.strip()
             if not line:
                 continue
@@ -469,7 +481,19 @@ def iter_samples_multi(path: str, clock_name: str, pc_name: str,
         tick = 0
         want_rise = sample_edge == "rising"
 
+        _trk = {clk_id, pc_id, valid_id, *aux_idx.keys()}
+        _trk.discard(None)
+        _bt = tuple(" " + i + "\n" for i in _trk) \
+            + tuple("\t" + i + "\n" for i in _trk) \
+            + tuple(" " + i + "\r\n" for i in _trk)
+        _st = tuple(i + "\n" for i in _trk) + tuple(i + "\r\n" for i in _trk)
+
         for raw in f:
+            _c = raw[0] if raw else "$"
+            if (_c == "b" or _c == "B") and not raw.endswith(_bt):
+                continue          # untracked wide signal: 1 C call, no alloc
+            if _c in "01xXzZ" and not raw.endswith(_st):
+                continue          # untracked scalar signal
             line = raw.strip()
             if not line:
                 continue
@@ -541,7 +565,19 @@ def iter_pc_changes(path: str, pc_name: str,
         cur_pc: Optional[int] = None
         cur_valid = 1 if valid_id is None else None
 
+        _trk = {pc_id, valid_id}
+        _trk.discard(None)
+        _bt = tuple(" " + i + "\n" for i in _trk) \
+            + tuple("\t" + i + "\n" for i in _trk) \
+            + tuple(" " + i + "\r\n" for i in _trk)
+        _st = tuple(i + "\n" for i in _trk) + tuple(i + "\r\n" for i in _trk)
+
         for raw in f:
+            _c = raw[0] if raw else "$"
+            if (_c == "b" or _c == "B") and not raw.endswith(_bt):
+                continue          # untracked wide signal: 1 C call, no alloc
+            if _c in "01xXzZ" and not raw.endswith(_st):
+                continue          # untracked scalar signal
             line = raw.strip()
             if not line:
                 continue
@@ -776,38 +812,82 @@ def iter_pc_samples_counter(path: str, clock_name: str, pc_name: str,
                     yield (t, v) + snap
             del pend[:]
 
+        # fast-reject dispatch (same technique as iter_commit_changes):
+        # a full-design fst2vcd dump is dominated by untracked signal
+        # lines -- reject them with one C-level endswith(tuple) call.
+        tracked = {clk_id, pc_id} | set(aux_idx)
+        if valid_id is not None:
+            tracked.add(valid_id)
+        b_sfx = [(" " + i + "\n", i) for i in tracked] \
+            + [("\t" + i + "\n", i) for i in tracked] \
+            + [(" " + i + "\r\n", i) for i in tracked]
+        s_sfx = [(i + "\n", i) for i in tracked] \
+            + [(i + "\r\n", i) for i in tracked]
+        b_tuple = tuple(s for s, _ in b_sfx)
+        s_tuple = tuple(s for s, _ in s_sfx)
+
         for raw in f:
-            line = raw.strip()
-            if not line:
+            c0 = raw[0] if raw else "$"
+            if c0 == "b" or c0 == "B":
+                if not raw.endswith(b_tuple):
+                    continue
+                for sfx, sid in b_sfx:
+                    if raw.endswith(sfx):
+                        if sid == clk_id:
+                            clk_raw = raw[1:-len(sfx)]  # parse at commit
+                        elif sid == pc_id:
+                            tok = raw[1:-len(sfx)]
+                            if not tok.strip("01"):
+                                cur_pc = int(tok, 2)
+                                if cur_valid == 1:
+                                    pend.append(cur_pc)
+                        elif sid in aux_idx:
+                            tok = raw[1:-len(sfx)]
+                            aux_cur[aux_idx[sid]] = \
+                                None if tok.strip("01") else int(tok, 2)
+                        elif valid_id is not None and sid == valid_id:
+                            tok = raw[1:-len(sfx)]
+                            v = None if tok.strip("01") else int(tok, 2)
+                            if v == 1 and cur_valid != 1 \
+                                    and cur_pc is not None:
+                                pend.append(cur_pc)
+                            cur_valid = v
+                        break
                 continue
-            c0 = line[0]
             if c0 == "#":
                 if pend:
                     for s in flush():
                         yield s
                 continue
-            if c0 == "$":
+            if c0 in "01xXzZ":
+                if not raw.endswith(s_tuple):
+                    continue
+                for sfx, sid in s_sfx:
+                    if raw.endswith(sfx) and len(raw) == 1 + len(sfx) \
+                            and raw[1:1 + len(sid)] == sid:
+                        v = None if c0 in "xXzZ" else int(c0)
+                        if sid == clk_id:
+                            clk_raw = c0 if c0 in "01xXzZ" else None
+                        elif sid == pc_id:
+                            if v is not None:
+                                cur_pc = v
+                                if cur_valid == 1:
+                                    pend.append(v)
+                        elif sid in aux_idx:
+                            aux_cur[aux_idx[sid]] = v
+                        elif valid_id is not None and sid == valid_id:
+                            if v == 1 and cur_valid != 1 \
+                                    and cur_pc is not None:
+                                pend.append(cur_pc)
+                            cur_valid = v
+                        break
                 continue
-            if c0 in "bB":
-                # hot path: manual split (one find, no list alloc)
-                sp = line.find(" ")
-                if sp < 0:
-                    sp = line.find("\t")
-                    if sp < 0:
-                        continue
-                ident = line[sp + 1:].strip()
-                if ident == clk_id:
-                    clk_raw = line[1:sp]       # store raw; parse at commit
-                    continue
-                if ident == pc_id:
-                    tok = line[1:sp]
-                    if not tok.strip("01"):
-                        cur_pc = int(tok, 2)
-                        if cur_valid == 1:
-                            pend.append(cur_pc)
-                    continue
-            ident2, v = _parse_value_line(c0, line)
-            if ident2 is None:
+            # dialect fallback (leading whitespace etc.)
+            line = raw.strip()
+            if not line or line[0] in "#$":
+                continue
+            ident2, v = _parse_value_line(line[0], line)
+            if ident2 is None or ident2 not in tracked:
                 continue
             if ident2 == pc_id:
                 if v is not None:
@@ -815,7 +895,7 @@ def iter_pc_samples_counter(path: str, clock_name: str, pc_name: str,
                     if cur_valid == 1:
                         pend.append(v)
             elif ident2 == clk_id:             # scalar-form counter line
-                clk_raw = line[0] if c0 in "01xXzZ" else None
+                clk_raw = line[0] if line[0] in "01xXzZ" else None
             elif ident2 in aux_idx:
                 aux_cur[aux_idx[ident2]] = v
             elif valid_id is not None and ident2 == valid_id:

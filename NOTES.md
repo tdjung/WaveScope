@@ -1,7 +1,7 @@
 # WaveScope — Project Notes (대화 인수인계용)
 
 > 새 대화 시작 시: 이 파일과 README.md를 먼저 읽고 이어서 작업.
-> 마지막 업데이트: 2026-07-18, v0.18.0
+> 마지막 업데이트: 2026-07-18, v0.18.1
 
 ## 1. 프로젝트 개요
 
@@ -277,6 +277,22 @@ isr-exit/stack-saturated — 이슈 6.1용), `isr enter/exit`(clamp 표시),
 `unmatched-ret`, `flow-anomaly`. 끝에 함수별 self 합계 + incoming arc
 전수(개수·inclusive)와 incl/self 비율 summary. 사용자에게 시뮬레이터
 로그와 같은 함수 구간을 나란히 받아 대조하는 워크플로 제안할 것.
+
+## 6e-2. v0.18.1 — 후속 (사용자: v0.18.0에도 reading 553.7s 불변)
+원인: v0.18.0 최적화는 iter_commit_changes(clockless)에만 적용됐고
+사용자는 counter clock(--clock) 경로 = iter_pc_samples_counter를 탐.
+→ counter 경로 전면 fast-reject 재작성 (노이즈 32신호/cycle 벤치
+74 MB/s), iter_samples_multi/iter_pc_samples/iter_pc_changes에는
+루프 상단 prefilter(untracked b/scalar 라인을 endswith 튜플 1회로
+기각) 삽입. 예상: 사용자 첫 pass ~120~150s, 캐시 hit 재실행은
+reading·convert 모두 소멸. 사용자 실측 timing: open/convert 104s
+(fst2vcd — 첫 실행 고정비), reading 553.7s(→개선 대상), engine 9.8s.
+
+사용자 확인 사항 (1번): 사라지던 assembly = ret 뒤 align 패딩 "nop".
+**우리 동작이 원래 맞음** — 함수 end를 symtab size로 잡아 패딩이
+자연 제외됨 (checkelf의 range_dropped 항목이 정확히 이 nop들).
+사용자가 자기 시뮬레이터를 우리 쪽에 맞춰 nop 제외하기로 결정 →
+이 diff 항목은 "설명된 차이"로 종결. --debug-roots 결과는 다음 회신.
 
 ## 6e. v0.18.0 — reader 병목 (사용자 실측: reading 550.4s vs engine 9.6s)
 사용자 파이프라인 = FST → fst2vcd 전체 변환 → 전 신호가 담긴 거대 VCD를
