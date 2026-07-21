@@ -31,7 +31,7 @@ Reproduced simulator quirks (kept for diff parity, marked QUIRK):
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 
-from .disasm import BinaryInfo
+from .disasm import BinaryInfo, direct_target
 from .profiler import (E_BC, E_BI, E_BIM, E_CY, E_DR, E_DW, E_IR, EVENTS,
                        N_EVENTS, CallSite, Profile)
 
@@ -186,8 +186,13 @@ class SimProfiler(object):
         return info
 
     # ------------------------------------------------------------------
-    def update_epc(self, epc: int, pc: int) -> None:
-        if (self.prev_epc != epc) or \
+    def update_epc(self, epc: int, pc: int, force: bool = False) -> None:
+        # `force` is feeder ADAPTER A4 (same-mepc interrupt re-entry
+        # detected from the waveform); the reference has no such
+        # parameter -- its change detection is blind to a loop being
+        # interrupted repeatedly at one pc (only the wfi case is
+        # covered), and the user's simulator shares that gap.
+        if force or (self.prev_epc != epc) or \
                 (self.is_wfi and self.after_wfi and
                  (self.wfi_func != self._infos_bracket(pc).func)):
 
@@ -205,6 +210,9 @@ class SimProfiler(object):
             self.prev_epc = epc
             self.is_isr = True
             self.n_isr_entries += 1
+            self._root("isr-enter", pc, epc,
+                       "forced(A4 reenter)" if force else "epc-change",
+                       len(self.call_stack))
 
             if self.isr_stack:
                 self.isr_call_stack_of_stack.append(self.call_stack)
@@ -249,6 +257,8 @@ class SimProfiler(object):
                         entry.events_at_entry[i])
                 self.call_stack.pop()
             self.isr_stack.pop()
+            self._root("isr-exit", base, None, "resume",
+                       len(self.call_stack))
 
             if not self.isr_stack:
                 self.is_isr = False
@@ -467,19 +477,26 @@ class SimProfiler(object):
 def _update_profile(p: SimProfiler, binary: BinaryInfo, classifier,
                     pc: int, epc: Optional[int], cyc_delta: int,
                     next_pc: Optional[int],
-                    static_cache: Dict[int, Tuple]) -> None:
+                    static_cache: Dict[int, Tuple],
+                    force_epc: bool = False) -> None:
     """One committed instruction, in the reference's exact call order."""
     if epc is not None:                       # ADAPTER A3
-        p.update_epc(epc, pc)
+        p.update_epc(epc, pc, force=force_epc)
     p.update(pc, TRACE_IR, 1)
     p.update(pc, TRACE_Cy_direct, cyc_delta)
 
     st = static_cache.get(pc)
     if st is None:
         insn = binary.insns.get(pc)
-        st = (insn, classifier.classify(insn) if insn else None)
+        cls = classifier.classify(insn) if insn else None
+        tgt = None
+        if cls is not None and (cls.is_cond_branch or cls.is_jump) \
+                and not cls.is_indirect:
+            tgt = direct_target(insn)
+        st = (insn, cls, tgt,
+              pc + insn.size if insn is not None else pc)
         static_cache[pc] = st
-    insn, cls = st
+    insn, cls = st[0], st[1]
     if insn is None:
         return
 
@@ -513,6 +530,7 @@ def run_sim(pc_stream, binary: BinaryInfo, classifier,
         p.root_log = {"n": {}, "ev": []}
 
     prev: Optional[Tuple] = None              # (pc, epc, cyc_delta)
+    last_fed = None                           # (cls, target, fallthrough)
     prev_tick: Optional[int] = None
     prev_pc: Optional[int] = None
     epc_seen = False
@@ -536,9 +554,29 @@ def run_sim(pc_stream, binary: BinaryInfo, classifier,
         if prev is not None:
             if trace_roots:
                 p.cur_tick = prev_tick
+            # ADAPTER A4: same-mepc re-entry -- the commit BEFORE the
+            # one being fed supplies the interrupted context; if the
+            # fed commit is an unexplained discontinuity whose source's
+            # successor equals the (unchanged) mepc, it is an interrupt
+            # entry the reference's change detection cannot see.
+            force = False
+            if prev[1] is not None and prev[1] == p.prev_epc \
+                    and last_fed is not None:
+                l_cls, l_tgt, l_ft = last_fed
+                if l_cls is not None and not l_cls.is_indirect \
+                        and not l_cls.is_return \
+                        and prev[0] != l_ft \
+                        and (l_tgt is None or prev[0] != l_tgt) \
+                        and prev[0] != prev[1] \
+                        and (prev[1] == l_ft or
+                             (l_tgt is not None and prev[1] == l_tgt)):
+                    force = True
             _update_profile(p, binary, classifier,
                             prev[0], prev[1], prev[2], pc,
-                            static_cache)                    # A1: one behind
+                            static_cache, force_epc=force)   # A1: one behind
+            st = static_cache.get(prev[0])
+            last_fed = (st[1], st[2], st[3]) \
+                if st is not None and st[0] is not None else None
         prev = cur
         prev_tick = tick
         prev_pc = pc

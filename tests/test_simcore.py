@@ -231,3 +231,49 @@ class TestSimEmptyStackTail(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSameEpcReentry(unittest.TestCase):
+    """ADAPTER A4: a loop interrupted repeatedly at the SAME pc never
+    changes mepc -- change detection (reference semantics) sees only the
+    first entry.  The waveform signal 'mepc == the interrupted insn's
+    successor at an unexplained discontinuity' recovers the rest."""
+
+    def _trace(self):
+        # aa loop: 0x2004 addi / 0x2008 beq(not taken) / 0x200c addi ->
+        # j? use straight-line + branch back... keep simple: interrupt
+        # always lands after 0x2004 (mepc = 0x2008 both times)
+        return [
+            (0, 0x2000, 0),
+            (1, 0x2004, 0),
+            (2, 0x7000, 0x2008),    # entry 1: mepc change 0 -> 0x2008
+            (3, 0x7004, 0x2008),
+            (4, 0x2008, 0x2008),    # resume
+            (5, 0x200c, 0x2008),
+            (6, 0x2004, 0x2008),    # loop back (branch elsewhere; here
+                                    # direct re-execution for the test)
+            (7, 0x7000, 0x2008),    # entry 2: mepc UNCHANGED (0x2008)
+            (8, 0x7004, 0x2008),
+            (9, 0x2008, 0x2008),    # resume 2
+            (10, 0x200c, 0x2008)]
+
+    def test_sim_detects_both_entries(self):
+        prof = run_sim(iter(self._trace()), milli_binary(), CL)
+        self.assertEqual(prof.exceptions, 2)
+        self.assertEqual(prof.isr_open, 0)
+        # handler first insn clamped both times
+        self.assertEqual(prof.self_cost[0x7000][E_CY], 2)
+
+    def test_legacy_detects_both_entries(self):
+        prof = run(iter(self._trace()), milli_binary(), CL)
+        self.assertEqual(prof.exceptions, 2)
+        self.assertEqual(prof.self_cost[0x7000][E_CY], 2)
+
+    def test_no_false_fire_on_taken_branch(self):
+        # a taken branch whose landing is its target must NOT trigger
+        # A4 even when mepc coincidentally equals the fallthrough
+        tr = [(0, 0x2004, 0x200c), (1, 0x2008, 0x200c),
+              (2, 0x2010, 0x200c),   # beq taken to 0x2010
+              (3, 0x6000, 0x200c)]
+        prof = run_sim(iter(tr), milli_binary(), CL)
+        self.assertEqual(prof.exceptions, 0)

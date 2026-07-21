@@ -551,24 +551,13 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
             return
 
         # --- fall-through into another function --------------------------------
-        # No jump executed, but the next PC is a different function's
-        # entry (cold/hot splits, asm). Model as an implicit tail
-        # transfer so the entered function receives an incoming arc.
-        # Millicode chain crossings (helper -> helper fall-through,
-        # __riscv_restore_10 -> _4 -> _0) are EXCLUDED to match the
-        # simulator, which creates nothing for non-branch transitions.
+        # Simulator parity (user-confirmed): fall-through function
+        # crossings create NO arc and NO frame -- the entered function
+        # accumulates self on its own pcs, its costs stay inside the
+        # currently open frames (like the simulator's accumulated -
+        # snapshot), and it appears as a ROOT in the call tree (a known,
+        # accepted artifact; both tools now agree).
         if cur_pc == p.fallthrough and callee_entry and diff_func:
-            if cur_func is not None and cur_func in helper_funcs:
-                return
-            if _close_loop_if_reentry(prof, stack, cur_pc, helper_starts):
-                prof.calls[(p.pc, cur_pc)].count += 1
-                return
-            _push_frame(prof, stack, isr_ctxs, FrameCtx(
-                func_start=cur_pc,
-                ret_addr=stack[-1].ret_addr if stack else None,
-                call_pc=p.pc,
-                callee_start=cur_pc,
-                is_tail=True), max_stack)
             return
 
     def step(pc: int, cycles: int, epc: Optional[int]) -> None:
@@ -662,7 +651,27 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
                 f_here = binary.func_at(pc)
                 wfi_wake = (is_wfi and after_wfi and wfi_func is not None
                             and f_here is not wfi_func)
-                if (changed or wfi_wake) and not epc_suppressed:
+                # Re-entry at the SAME mepc value: a loop interrupted
+                # repeatedly at one pc never changes mepc, so change
+                # detection is blind (the reference shares this gap and
+                # only covers the wfi case).  The waveform carries a
+                # stronger signal: hardware wrote mepc = the pc that was
+                # ABOUT to execute, so an unexplained discontinuity
+                # whose source's successor EQUALS the current mepc is an
+                # interrupt entry even without an mepc change.
+                reenter = (epc_init and not changed and not wfi_wake
+                           and pending is not None
+                           and pending.cls is not None
+                           and not pending.cls.is_indirect
+                           and not pending.cls.is_return
+                           and pc != pending.fallthrough
+                           and (pending.target is None
+                                or pc != pending.target)
+                           and pc != epc
+                           and (epc == pending.fallthrough
+                                or (pending.target is not None
+                                    and epc == pending.target)))
+                if (changed or wfi_wake or reenter) and not epc_suppressed:
                     f_epc = binary.func_at(epc) if changed else None
                     if changed and f_epc is not None and f_here is not None \
                             and f_epc is f_here:
@@ -679,8 +688,16 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
                         # it after the handler returns
                         isr_ctxs.append(IsrCtx(depth=len(stack), resume=epc,
                                                saved=pending, kind="epc"))
+                        if prof.root_log is not None:
+                            why0 = ("mepc-change" if changed else
+                                    ("wfi-wake" if wfi_wake
+                                     else "mepc-reenter"))
+                            _root_ev(prof, "isr-enter", pc, epc,
+                                     why0, len(stack))
                         if dbg is not None:
-                            why = "wfi-wake" if not changed else "mepc-change"
+                            why = ("wfi-wake" if wfi_wake else
+                                   ("mepc-reenter" if reenter
+                                    else "mepc-change"))
                             sv = (f" saved-pending={pending.insn.mnemonic}"
                                   f"@0x{pending.pc:x}" if pending else "")
                             dbg.note(f"isr enter({why}) handler=0x{pc:x} "
@@ -702,6 +719,10 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
                 # pre-interrupt context (works after indirect jumps too)
                 if pc == ctx.resume:
                     isr_ctxs.pop()
+                    if prof.root_log is not None:
+                        _root_ev(prof, "isr-exit", pc, None,
+                                 f"resume, unwound to depth {ctx.depth}",
+                                 len(stack))
                     _unwind_to(prof, stack, min(ctx.depth, len(stack)),
                                "isr-exit(epc)")
                     pending = ctx.saved          # discard the xret pending;

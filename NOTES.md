@@ -1,7 +1,7 @@
 # WaveScope — Project Notes (대화 인수인계용)
 
 > 새 대화 시작 시: 이 파일과 README.md를 먼저 읽고 이어서 작업.
-> 마지막 업데이트: 2026-07-18, v0.18.1
+> 마지막 업데이트: 2026-07-19, v0.19.0
 
 ## 1. 프로젝트 개요
 
@@ -277,6 +277,31 @@ isr-exit/stack-saturated — 이슈 6.1용), `isr enter/exit`(clamp 표시),
 `unmatched-ret`, `flow-anomaly`. 끝에 함수별 self 합계 + incoming arc
 전수(개수·inclusive)와 incl/self 비율 summary. 사용자에게 시뮬레이터
 로그와 같은 함수 구간을 나란히 받아 대조하는 워크플로 제안할 것.
+
+## 6f. v0.19.0 — ISR 재진입 맹점 (사용자 --debug-roots가 잡아낸 것)
+사용자 로그: "t=745 push depth=3 SYS_system_startup -> ISR_InvokeClock"
+= ISR 진입이 감지되지 않고 일반 call로 push됨 + 이후 pop 꼬임.
+진단: **같은 pc가 반복 인터럽트되면 mepc 값이 안 변해** 변화 감지가
+2회차부터 실명 (레퍼런스도 동일한 맹점 — wfi 케이스만 별도 커버.
+사용자 시뮬레이터도 같은 갭을 가질 가능성 높음 → 사용자에게 제기).
+놓친 진입 후 handler의 ret들이 일반 스택 바닥 frame을 pop
+(sim은 RETURN 무조건 pop이라 특히) → SYS_BSP_reset arc 조기 마감 =
+"root inclusive 과소"의 유력 본체.
+수정 = **ADAPTER A4** (양 엔진): 파형의 더 강한 신호 사용 — 하드웨어는
+mepc에 "실행 직전이던 pc"를 쓰므로, 설명 불가능한 불연속에서
+mepc == 직전 insn의 후속 주소(fallthrough 또는 direct target)면 값이
+안 변해도 재진입. 조건: epc 무변화 && pending 비간접·비리턴 &&
+착지가 후속들과 불일치 && mepc ∈ {fallthrough, target} && 착지 != mepc.
+sim은 update_epc(force=) 인자로 주입 (전사 이탈, ADAPTER 표기).
+--debug-roots에 isr-enter(사유: mepc-change/wfi-wake/mepc-reenter)와
+isr-exit 이벤트 추가 — 다음 회신에서 t=745 지점이 isr-enter로 바뀌는지
+확인. 예상: exceptions 카운트 급증 + root inclusive 회복.
+
+또한 fall-through parity 확정 (사용자 확인): fall-through 함수 경계
+crossing은 **arc/frame 미생성** (시뮬레이터 동일) — 비용은 열린 상위
+frame들에 흡수, 해당 함수는 self만 가진 root로 표시 (양쪽 합의된
+아티팩트). legacy의 비-helper fall-through push 제거.
+nop 이슈는 사용자측 종결 (시뮬레이터를 우리에 맞춤).
 
 ## 6e-2. v0.18.1 — 후속 (사용자: v0.18.0에도 reading 553.7s 불변)
 원인: v0.18.0 최적화는 iter_commit_changes(clockless)에만 적용됐고

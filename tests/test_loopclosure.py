@@ -58,11 +58,13 @@ class TestLoopClosure(unittest.TestCase):
         self.assertLess(total_incl, 12 * n,
                         f"inclusive sum {total_incl} suggests per-iteration "
                         f"frame stacking")
-        # the entered-label frame survives the whole loop: outer->loop arc
-        # inclusive covers all iterations + ret
-        key = (0x2000, 0x2004)
-        self.assertIn(key, prof.calls)
-        self.assertEqual(prof.calls[key].inclusive[E_IR], 3 * n + 1)
+        # simulator parity (v0.19.0): fall-through into the label makes
+        # NO arc; the loop's cost stays inside the caller's open frame,
+        # so main->outer absorbs everything and loop_lbl is a root with
+        # self only
+        self.assertNotIn((0x2000, 0x2004), prof.calls)
+        self.assertEqual(prof.calls[(0x1000, 0x2000)].inclusive[E_IR],
+                         3 * n + 2)   # outer entry + loop body + ret
 
     def test_stack_stays_bounded(self):
         prof = run(iter(make_trace(500)), B(), get_classifier("riscv"),
