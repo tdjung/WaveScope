@@ -343,6 +343,28 @@ def check_disasm(elf_path: str, toolchain_prefix: str = "",
             a = int(m.group(1), 16)
             raw_by_addr.setdefault(a, line)
 
+    # alias groups: several symtab names at one address (millicode
+    # __riscv_restore_0..3 style) -- only ONE name can be canonical, and
+    # if the simulator's symbolizer picks a different alias, its calls
+    # appear "missing" under the expected name
+    symout = subprocess.run([objdump, "-t", *dm, elf_path],
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE,
+                            universal_newlines=True, check=True)
+    by_addr: Dict[int, List[str]] = {}
+    for line in symout.stdout.splitlines():
+        m = _SYM_RE.match(line)
+        if m and "F" in (m.group(8) or "") + (m.group(6) or ""):
+            nm = m.group(11).strip() if m.lastindex >= 11 else ""
+            if nm:
+                by_addr.setdefault(int(m.group(1), 16), []).append(
+                    nm.replace(".hidden ", ""))
+    aliases = []
+    canon = {f.start: f.name for f in b.funcs}
+    for a, names in sorted(by_addr.items()):
+        if len(names) > 1:
+            aliases.append((a, sorted(set(names)), canon.get(a)))
+
     parse_missing = sorted(a for a in raw_by_addr if a not in b.insns)
     covered = set()
     for f in b.funcs:
@@ -385,4 +407,5 @@ def check_disasm(elf_path: str, toolchain_prefix: str = "",
         "gaps": gaps[:max_show], "n_gaps": len(gaps),
         "end_mismatch": end_mismatch[:max_show],
         "n_end_mismatch": len(end_mismatch),
+        "aliases": aliases[:max_show], "n_aliases": len(aliases),
     }

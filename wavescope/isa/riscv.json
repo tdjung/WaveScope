@@ -39,10 +39,7 @@
    "jalr",
    "ret",
    "c.jr",
-   "c.jalr",
-   "mret",
-   "sret",
-   "uret"
+   "c.jalr"
   ],
   "load": [
    "lb",

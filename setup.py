@@ -4,7 +4,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="wavescope",
-    version="0.19.0",
+    version="0.20.0",
     description=("Extract PC/clock from RTL waveforms and generate "
                  "callgrind profiles using ELF debug symbols"),
     python_requires=">=3.6",

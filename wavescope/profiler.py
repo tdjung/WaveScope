@@ -142,6 +142,7 @@ class Profile:
         self.isr_kind = None         # 'epc' | 'level' when signal-driven        # an epc value was actually seen
         self.spurious_epc = 0        # same-function mepc changes suppressed
         self.flow_anomalies = 0      # unexplained discontinuities (epc mode)
+        self.orphan_xrets = 0        # xret committed with no ISR context
         self.isr_open = 0            # ISR contexts alive at end of trace
 
     def _update(self, pc: int, ev: int, n: int, stack: List[FrameCtx]) -> None:
@@ -383,6 +384,7 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
     prof = Profile(binary)
     prof.debug = dbg = debug
     static_cache: Dict[int, Tuple] = {}
+    handler_entries: set = set()
     fmap: Dict[int, object] = {}
     entry_set = frozenset(f.start for f in binary.funcs)
     if trace_roots:
@@ -458,6 +460,21 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
         # unwinds the whole consecutive tail chain plus the normal frame
         # anchoring it (callers' inclusive covers tail continuations).
         if cls.is_return or (cls.is_jump and cls.is_indirect and not cls.writes_link):
+            # xret in epc mode: the architectural landing is mepc, and
+            # frame unwinding for a DETECTED exit happens in the ISR-exit
+            # machinery (pc == ctx.resume), which also discards the xret
+            # pending -- so an xret reaching resolve() means its entry
+            # was MISSED (same-mepc nested/looped interrupt).  Scanning
+            # the ret-addr stack with it would pop unrelated bottom
+            # frames (the root-inclusive damage); never let it.
+            if prof.epc_mode and p.insn.mnemonic in XRET_MNEMONICS:
+                if not any(c.kind == "epc" for c in isr_ctxs):
+                    prof.orphan_xrets += 1
+                if prof.root_log is not None:
+                    _root_ev(prof, "orphan-xret", p.pc, cur_pc,
+                             "missed ISR entry: xret with no open epc "
+                             "context (stack untouched)", len(stack))
+                return
             for i in range(len(stack) - 1, -1, -1):
                 if stack[i].ret_addr == cur_pc:
                     j = i
@@ -671,7 +688,22 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
                            and (epc == pending.fallthrough
                                 or (pending.target is not None
                                     and epc == pending.target)))
-                if (changed or wfi_wake or reenter) and not epc_suppressed:
+                # A4 cannot fire when the interrupted insn is INDIRECT
+                # (jalr: mepc = the unknowable target).  But hardware
+                # always enters a handler at its ENTRY pc, so once an
+                # entry pc has been seen via a detected entry, any later
+                # transfer landing there that is not a verified direct
+                # transfer is an entry too (resume = current mepc).
+                known_handler = (epc_init and not changed and not wfi_wake
+                                 and not reenter
+                                 and pc in handler_entries
+                                 and pending is not None
+                                 and pc != epc
+                                 and pc != pending.fallthrough
+                                 and (pending.target is None
+                                      or pc != pending.target))
+                if (changed or wfi_wake or reenter or known_handler) \
+                        and not epc_suppressed:
                     f_epc = binary.func_at(epc) if changed else None
                     if changed and f_epc is not None and f_here is not None \
                             and f_epc is f_here:
@@ -688,16 +720,19 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
                         # it after the handler returns
                         isr_ctxs.append(IsrCtx(depth=len(stack), resume=epc,
                                                saved=pending, kind="epc"))
+                        handler_entries.add(pc)
                         if prof.root_log is not None:
                             why0 = ("mepc-change" if changed else
-                                    ("wfi-wake" if wfi_wake
-                                     else "mepc-reenter"))
+                                    ("wfi-wake" if wfi_wake else
+                                     ("mepc-reenter" if reenter
+                                      else "handler-entry")))
                             _root_ev(prof, "isr-enter", pc, epc,
                                      why0, len(stack))
                         if dbg is not None:
-                            why = ("wfi-wake" if wfi_wake else
-                                   ("mepc-reenter" if reenter
-                                    else "mepc-change"))
+                            why = ("mepc-change" if changed else
+                                   ("wfi-wake" if wfi_wake else
+                                    ("mepc-reenter" if reenter
+                                     else "handler-entry")))
                             sv = (f" saved-pending={pending.insn.mnemonic}"
                                   f"@0x{pending.pc:x}" if pending else "")
                             dbg.note(f"isr enter({why}) handler=0x{pc:x} "

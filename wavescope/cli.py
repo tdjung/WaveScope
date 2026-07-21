@@ -558,6 +558,14 @@ def cmd_checkelf(args) -> int:
               f"next addr; wrong instruction sizes):")
         for name, a, sz, nxt in r["gaps"]:
             print(f"  {name}: {a:#x}+{sz} != {nxt:#x}")
+    if r["n_aliases"]:
+        print(f"[checkelf] {r['n_aliases']} alias groups (multiple "
+              f"symbols at one address; WaveScope's canonical name is "
+              f"shown -- if the simulator's symbolizer picks another "
+              f"alias, its calls appear 'missing' under that name):")
+        for a, names, canon in r["aliases"]:
+            print(f"  {a:#x}: {', '.join(names)} -> WaveScope uses "
+                  f"{canon!r}")
     if r["n_end_mismatch"]:
         print(f"[checkelf] {r['n_end_mismatch']} functions whose recorded "
               f"end differs from last-insn end (symtab size vs "

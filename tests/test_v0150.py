@@ -181,3 +181,28 @@ class TestConsistencyChecker(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestJcndOrder(unittest.TestCase):
+    def test_descending_count_ties_by_address(self):
+        # simulator order: jcnd=18/27 before jcnd=9/27; equal counts by
+        # ascending target address
+        b = B()
+        from wavescope.disasm import Insn
+        b.insns[0x2004] = Insn(0x2004, 4, "beq", "s0,s1,2010 <x>")
+        b.insns[0x2010] = Insn(0x2010, 4, "addi", "a0,a0,1")
+        tr = []
+        t = 0
+        for taken in ([True] * 2 + [False] * 1):
+            tr.append((t, 0x2000)); t += 1
+            tr.append((t, 0x2004)); t += 1
+            tr.append((t, 0x2010 if taken else 0x2008)); t += 1
+            tr.append((t, 0x2000)); t += 1
+        prof = run(iter([(i, pc) for i, (_, pc) in enumerate(tr)]
+                        if False else tr), b, CL)
+        out = io.StringIO()
+        write_callgrind(prof, out, "fw.elf")
+        lines = [ln for ln in out.getvalue().splitlines()
+                 if ln.startswith("jcnd=")]
+        c = [int(ln.split("=")[1].split("/")[0]) for ln in lines]
+        self.assertEqual(c, sorted(c, reverse=True))

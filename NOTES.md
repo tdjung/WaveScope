@@ -1,7 +1,7 @@
 # WaveScope — Project Notes (대화 인수인계용)
 
 > 새 대화 시작 시: 이 파일과 README.md를 먼저 읽고 이어서 작업.
-> 마지막 업데이트: 2026-07-19, v0.19.0
+> 마지막 업데이트: 2026-07-19, v0.20.0
 
 ## 1. 프로젝트 개요
 
@@ -277,6 +277,36 @@ isr-exit/stack-saturated — 이슈 6.1용), `isr enter/exit`(clamp 표시),
 `unmatched-ret`, `flow-anomaly`. 끝에 함수별 self 합계 + incoming arc
 전수(개수·inclusive)와 incl/self 비율 summary. 사용자에게 시뮬레이터
 로그와 같은 함수 구간을 나란히 받아 대조하는 워크플로 제안할 것.
+
+## 6g. v0.20.0 — 사용자 5개 항목 (사용량 초과로 중단 후 재개분)
+1. jcnd **내림차순** 정정 (v0.17의 오름차순은 오해였음): 18/27 → 9/27,
+   동수면 타겟 주소 오름차순. 테스트로 고정.
+2. unimp = nop과 동일 (ret 뒤 symtab size 밖 정렬/경계 패딩, 0x0000).
+   제외가 맞음 — 시뮬레이터도 nop과 함께 제외 권고. checkelf
+   range_dropped가 나열해줌. 코드 변경 없음.
+3+4. ISR 잔여 누락 대응 (사용자 제공 정보: **중첩 ISR은 ISS에서 epc
+   미갱신** + wfi 복합 시 epc만으로 애매 — 후자는 이미 전사됨):
+   (a) xret(mret/sret/uret)을 riscv.json indirect_jump에서 제거 —
+       system 명령이지 JUMP group이 아님 (양 엔진 공통: Bi/Bim 미부과,
+       sim feeder update_branch 미발행 → rule4 오판 소멸). **ISS
+       decode도 xret이 JUMP group 밖인지 사용자 확인 필요.**
+   (b) legacy orphan-xret 가드: epc 모드에서 resolve까지 도달한 xret =
+       진입을 놓친 증거 (감지된 exit은 resume commit에서 pending을
+       폐기하므로 resolve에 안 옴) → ret-match 스캔 금지 (바닥 frame
+       훼손 차단), prof.orphan_xrets 카운트 + root 이벤트.
+   (c) legacy known-handler-entry 휴리스틱: A4는 간접(jalr) 소스를
+       의도적으로 제외 (mepc=알 수 없는 target) — 사용자 로그의 잔여
+       "SYS_system_startup -> ISR_x push"의 유력 기전. 감지된 진입에서
+       handler entry pc를 학습, 이후 그 주소로의 비검증 착지(직접
+       target/fallthrough 불일치, pc≠epc)는 mepc 무변화여도 진입
+       (resume=현재 mepc). sim은 순수성 유지 (A4까지만) — both 비교로
+       발산 가시화.
+5. restore call 누락 신규 가설 = **별칭**: restore_0~3이 동일 주소,
+   canonical 1개만 출력됨. checkelf에 alias 그룹 리포트 추가 (실물
+   millicode에서 6그룹 검출 확인). 사용자 확인 요청: checkelf 실행 +
+   출력에서 `grep "cfn=__riscv_restore"` — 빠진 call이 같은 주소의
+   다른 restore_N 이름으로 있는지. helper tail-return의 이름 기반
+   처리(contains + ret/jr t0)는 양 엔진 구현·테스트 완료 상태.
 
 ## 6f. v0.19.0 — ISR 재진입 맹점 (사용자 --debug-roots가 잡아낸 것)
 사용자 로그: "t=745 push depth=3 SYS_system_startup -> ISR_InvokeClock"

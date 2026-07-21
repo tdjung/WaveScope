@@ -277,3 +277,68 @@ class TestSameEpcReentry(unittest.TestCase):
               (3, 0x6000, 0x200c)]
         prof = run_sim(iter(tr), milli_binary(), CL)
         self.assertEqual(prof.exceptions, 0)
+
+
+class TestOrphanXret(unittest.TestCase):
+    """A missed ISR entry leaves the handler's mret with no open epc
+    context; it must never scan/pop the normal stack (that was the
+    root-inclusive damage)."""
+
+    def test_stack_protected(self):
+        # tracked call main->aa is open; an mret from nowhere commits
+        # (its entry was missed) and lands back inside aa
+        b = milli_binary()
+        b.insns[0x7004] = b.insns[0x7004]  # mret already present
+        tr = [(0, 0x0500, 0), (1, 0x1000, 0), (2, 0x1004, 0),
+              (3, 0x2000, 0),
+              (4, 0x7000, 0), (5, 0x7004, 0),   # handler w/o epc change
+              (6, 0x2004, 0), (7, 0x2008, 0)]
+        prof = run(iter(tr), b, CL)
+        self.assertEqual(prof.orphan_xrets, 1)
+        # frames survived: main->aa arc closes only at the drain with
+        # everything from aa's entry onward
+        self.assertIn((0x1004, 0x2000), prof.calls)
+        self.assertEqual(prof.calls[(0x1004, 0x2000)].inclusive[E_IR], 5)
+
+
+class TestKnownHandlerEntry(unittest.TestCase):
+    """A4 cannot see an interrupt that fires after an INDIRECT call
+    (mepc = the unknowable target); but once the handler's entry pc is
+    known from a detected entry, landing there without a verified
+    direct transfer is an entry (resume = current mepc)."""
+
+    def _binary(self):
+        b = milli_binary()
+        from wavescope.disasm import Insn
+        b.insns[0x200c] = Insn(0x200c, 4, "jalr", "ra,0(a5)")
+        return b
+
+    def test_second_entry_via_indirect(self):
+        tr = [(0, 0x2000, 0),
+              (1, 0x2004, 0),
+              (2, 0x7000, 0x2008),   # entry 1: mepc change (learn 0x7000)
+              (3, 0x7004, 0x2008),
+              (4, 0x2008, 0x2008),   # resume
+              (5, 0x200c, 0x2008),   # jalr commits; interrupt fires
+              (6, 0x7000, 0x2008),   # entry 2: mepc UNCHANGED, src indirect
+              (7, 0x7004, 0x2008),
+              (8, 0x2008, 0x2008)]   # resume 2 (mepc value)
+        prof = run(iter(tr), self._binary(), CL)
+        self.assertEqual(prof.exceptions, 2)
+        self.assertEqual(prof.self_cost[0x7000][E_CY], 2)  # both clamped
+        self.assertEqual(prof.orphan_xrets, 0)
+
+    def test_direct_call_to_handler_not_flagged(self):
+        # init code legitimately jal-calls the handler function: landing
+        # equals the direct target -> NOT an entry
+        b = self._binary()
+        from wavescope.disasm import Insn
+        b.insns[0x2004] = Insn(0x2004, 4, "jal", "ra,7000 <isr>")
+        tr = [(0, 0x2000, 0x9000),
+              (1, 0x2004, 0x9000),
+              (2, 0x7000, 0x9000),   # direct call, mepc unrelated
+              (3, 0x7004, 0x9000),
+              (4, 0x2008, 0x9000)]
+        prof = run(iter(tr), b, CL)
+        self.assertEqual(prof.exceptions, 0)
+        self.assertIn((0x2004, 0x7000), prof.calls)

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wavescope"
-version = "0.19.0"
+version = "0.20.0"
 description = "Extract PC/clock from RTL waveforms and generate callgrind profiles using ELF debug symbols"
 readme = "README.md"
 requires-python = ">=3.6"
