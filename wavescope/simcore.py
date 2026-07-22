@@ -140,6 +140,12 @@ class SimProfiler(object):
         self.isr_stack: List[IsrInfo] = []
         self.isr_call_stack_of_stack: List[List[CallStackEntry]] = []
 
+        self.sizes_ = {pc: insn.size for pc, insn in binary.insns.items()}
+        self.entry_set_ = {f.start for f in binary.funcs}
+        self.prev_ft = None        # A6: expected sequential successor
+        self.flow_lost = False     # A6: pcs ran outside the known text
+        self._flowchk_base = None  # A6: once-per-commit dedup
+
         self.last_pc = 0
         self.branchType = BT_NONE
         self.last_was_branch = False
@@ -171,6 +177,9 @@ class SimProfiler(object):
         self.n_return_guard = 0    # A5a: RETURN pops skipped (landing
                                    # still inside the top frame's callee)
         self.n_chain_guard = 0     # A5b: tail-chain pops stopped early
+        self.n_disc_returns = 0    # A6: frames closed by a discontinuity
+                                   # landing on an open frame's return
+                                   # address with no branch committed
         self.dropped_unknown_pc = 0
 
     def _root(self, kind, cp, callee, info, depth):
@@ -237,6 +246,8 @@ class SimProfiler(object):
 
             self.last_was_branch = False
             self.first_isr_cycle = True
+            self.prev_ft = None        # A6: handler entry is not a return
+            self.flow_lost = False
 
     # ------------------------------------------------------------------
     def update(self, base: int, event: int, count: int) -> None:
@@ -244,6 +255,7 @@ class SimProfiler(object):
             return
         if base not in self.infos_:
             self.dropped_unknown_pc += 1
+            self.flow_lost = True      # A6: veneer/far-stub territory
             return
         info = self.infos_[base]
 
@@ -283,12 +295,34 @@ class SimProfiler(object):
             else:
                 self.call_stack = self.isr_call_stack_of_stack.pop()
                 self.prev_epc = self.isr_stack[-1].epc
+            self.prev_ft = None        # A6: resume pc is not a return
+            self.flow_lost = False
 
         # previous instruction was a branch: settle it with this landing
+        settled = False
         if self.last_pc != 0 and self.last_was_branch:
             self.check_branch_type(base)
             self.handler_branch(base)
             self.last_was_branch = False
+            settled = True
+
+        # ADAPTER A6 (NOT in the reference): sequential flow broke with
+        # NO branch committed -- macro-fused pairs (auipc+jr/jalr: only
+        # the auipc's pc is sampled), veneers/far-stubs through
+        # untracked code, or a dropped jump commit.  The reference
+        # simply never closes the open frame, which then swallows the
+        # rest of the run as bogus inclusive cost (the reported
+        # 139k-instruction arc for a 1-instruction function).  If the
+        # landing equals an open frame's return address, close down to
+        # that frame; entries are excluded (missed call / interrupt).
+        if self._flowchk_base != base:
+            self._flowchk_base = base
+            disc = self.flow_lost or (self.prev_ft is not None
+                                      and base != self.prev_ft)
+            if disc and not settled:
+                self._disc_return(base)
+            self.flow_lost = False
+            self.prev_ft = base + self.sizes_.get(base, 4)
 
         if event == TRACE_Cy_direct:
             if self.first_isr_cycle:          # ISR first insn: clamp to 1
@@ -326,6 +360,56 @@ class SimProfiler(object):
         self.branchType = event
         self.last_was_branch = True
         self.last_branch_taken = taken
+
+    # ------------------------------------------------------------------
+    def _disc_return(self, cur_pc: int) -> None:
+        """ADAPTER A6 body: scan open frames for one whose return
+        address (caller_pc + caller insn size) equals the landing; tail
+        entries' caller_pc is the tail-jump pc so a chain naturally
+        matches at its anchor and the tails above it are closed with
+        it.  A5-style landing rule still applies to the frames being
+        swept: never close one whose callee contains the landing."""
+        if not self.call_stack or cur_pc in self.entry_set_:
+            return
+        stk = self.call_stack
+        matched = None
+        for i in range(len(stk) - 1, -1, -1):
+            cp = stk[i].caller_pc
+            if cp + self.sizes_.get(cp, 4) == cur_pc:
+                matched = i
+                break
+        if matched is None:
+            return
+        to_info = self.infos_.get(cur_pc)
+        to_func = to_info.func if to_info is not None else None
+        self.n_disc_returns += 1
+        self._root("disc-ret", stk[matched].caller_pc,
+                   stk[matched].callee_pc,
+                   f"flow discontinuity lands at this frame's return "
+                   f"address 0x{cur_pc:x} with no branch committed "
+                   f"(fused pair / hidden jump / untracked code) -- "
+                   f"closing {len(stk) - matched} frame(s) (A6)",
+                   matched + 1)
+        while len(self.call_stack) > matched:
+            e = self.call_stack[-1]
+            if (len(self.call_stack) - 1 != matched
+                    and to_func is not None
+                    and e.callee_func == to_func
+                    and e.callee_func != e.caller_func):
+                self.n_chain_guard += 1
+                self._root("chain-guard", e.caller_pc, e.callee_pc,
+                           f"disc-ret sweep stopped: landing "
+                           f"0x{cur_pc:x} is inside this frame's callee "
+                           f"(A5/A6)", len(self.call_stack))
+                break
+            self._root("pop", e.caller_pc, e.callee_pc,
+                       f"disc-ret landing 0x{cur_pc:x} (A6)",
+                       len(self.call_stack))
+            self.call_stack.pop()
+            ci = self.calls[e.caller_pc][e.callee_pc]
+            for k in range(N_EVENTS):
+                ci.inclusive[k] += (self.accumulated_events[k]
+                                    - e.events_at_entry[k])
 
     # ------------------------------------------------------------------
     def check_branch_type(self, cur_pc: int) -> None:
@@ -692,6 +776,7 @@ def _to_profile(p: SimProfiler, binary: BinaryInfo, epc_seen: bool) -> Profile:
     prof.guarded_unwinds = p.n_return_guard + p.n_chain_guard
     prof.return_guards = p.n_return_guard
     prof.chain_guards = p.n_chain_guard
+    prof.discontinuity_returns = p.n_disc_returns
     return prof
 
 

@@ -1,7 +1,7 @@
 # WaveScope — Project Notes (대화 인수인계용)
 
 > 새 대화 시작 시: 이 파일과 README.md를 먼저 읽고 이어서 작업.
-> 마지막 업데이트: 2026-07-21, v0.20.3
+> 마지막 업데이트: 2026-07-22, v0.20.4
 
 ## 1. 프로젝트 개요
 
@@ -277,6 +277,74 @@ isr-exit/stack-saturated — 이슈 6.1용), `isr enter/exit`(clamp 표시),
 `unmatched-ret`, `flow-anomaly`. 끝에 함수별 self 합계 + incoming arc
 전수(개수·inclusive)와 incl/self 비율 summary. 사용자에게 시뮬레이터
 로그와 같은 함수 구간을 나란히 받아 대조하는 워크플로 제안할 것.
+
+## 6k. v0.20.4 — ★★ 다음 세션 최우선: disc-ret (auipc-return frame 유출 수리, 사용자 재실행 대기)
+
+### 사용자 피드백 (2026-07-22, v0.20.3 실행 결과)
+
+- ✅ _start가 root 최상위 복귀, t=154 붕괴 소멸 (landing guard 유효 확인).
+- ✅ t=47/145/147/158의 SYS_initi* 생략 표기 = 전부 같은 함수 (SYS_initialize).
+- ❌ 신규(공통) 이슈: **auipc return** — A가 B 호출, B는 if로 대부분
+  미실행이라 `auipc t1,0xf1000` 단 1개 커밋(Ir=1, Cy=3) 후 곧바로 A의
+  복귀지점으로 커밋이 점프. arc(A→B) inclusive가 sim 139,084 /
+  legacy 1,116,524로 폭주. **RISC-V macro-fusion (auipc+jr/jalr 쌍이
+  1커밋으로 합쳐져 뒤 점프 pc가 파형에 안 찍힘)** 또는 far-stub이
+  ELF 밖 코드로 나갔다 돌아오는 경우 → 분류 가능한 return이 안 보여
+  (A→B) frame이 영영 안 닫히고 이후 실행 전부를 흡수하던 것.
+- ❌ legacy 전용 이슈(보류): inclusive top 항목들 — self는 정상인데
+  inclusive만 큼 = frame 유출의 전형적 시그니처. disc-ret로 같이
+  풀릴 가능성 높음 (leaked frame이 흡수한 비용). v0.20.4 결과로 판정.
+
+### v0.20.4 수정 = discontinuity return (disc-ret, 양 엔진·ISA 무관)
+
+branch 커밋 없이 순차 흐름이 깨졌고(disc) 착지가 **열린 frame의 복귀
+주소와 정확히 일치**하면 return으로 간주하고 그 frame까지 닫음
+(tail 상속/anchor 매칭, v0.20.3 landing floor 그대로 적용). 함수
+ENTRY 착지는 제외 — entry로의 불연속은 missed call 또는 인터럽트라
+기존 휴리스틱/epc 예외 감지가 그대로 담당 (회귀 테스트로 고정).
+
+- legacy: ① heur 모드 2b에서 가짜 ISR entry 선언 전에 disc-ret 시도
+  (auipc-return이 유령 IsrCtx를 만들던 것도 함께 제거, exceptions
+  오염 방지) ② epc 모드 resolve() anomaly 경로에서 disc-ret 시도
+  (매칭 시 flow_anomalies 미집계) ③ unknown pc 구간(lost_flow) 재진입
+  시 disc-ret (far-stub → ELF 밖 → 복귀). 카운터
+  prof.discontinuity_returns + "disc-ret" root 이벤트.
+- sim: **ADAPTER A6** — prev_ft(직전 known 커밋의 fallthrough) 추적,
+  settle 안 된 불연속에서 caller_pc+size == 착지인 frame 스캔 후 그
+  위를 sweep해 닫음 (A5 callee-포함 가드 유지). ISR entry/exit 시
+  prev_ft 리셋(resume/handler 진입은 return 아님). unknown pc는
+  flow_lost 마킹. sim의 jr-경유 far-stub은 pending이 unknown 구간을
+  살아남아 rule4로 자가 치유되는 경우도 있음(레퍼런스 동작 보존).
+- ARM: 전부 엔진 레벨이라 armv7m/aarch64 동일 적용 (movw/movt+bx
+  veneer 시나리오 armv7m 테스트 추가 — 사용자 명시 요청).
+- tests/test_v0204.py 7종: fused-pair(양엔진+epc모드), far-stub
+  unknown 구간, ARM veneer, heur-ISR entry 비회귀. 6000-insn 후속
+  실행 합성에서 arc(A→B) Ir=1 확인. 전체 181 테스트 green.
+- 부수: A6가 test_v0203 재귀 테스트의 비아키텍처적 합성 trace 결함을
+  검출 → trace를 실제 분기 포함 형태로 교정 (A6 민감도 방증).
+
+### 사용자 회신 요청
+
+1. v0.20.4 재실행: 문제의 arc(A→B) inclusive가 Ir≈1/Cy≈3으로
+   내려왔는지 + stderr "N discontinuity returns" 수치.
+2. --debug-roots에서 해당 지점의 "disc-ret" 이벤트 라인 (fused pair가
+   상시 패턴이면 실행당 수백 회일 수 있음 — 카운트만이라도).
+3. **8번 legacy-전용 inclusive top 이슈**가 함께 해소됐는지. 남아있으면
+   해당 함수의 --check-inclusive 델타와 --debug-roots 인근 로그 요청
+   (leaked frame 흡수가 아니라면 별도 원인 — heal/ret-match 오매칭 등
+   후보 조사 필요).
+4. (미결 유지) t=145 조기 pop의 [사유] 문자열 — 6j 질문 3번 그대로.
+   landing guard가 피해를 막고는 있지만 병소 원인은 아직 미확정.
+
+### 한계/유의
+
+- disc-ret은 복귀주소 정확 일치 시에만 발동 (보수적). fused **call**
+  (auipc+jalr ra가 함수 entry로 점프)은 아직 미처리 — entry 착지는
+  ISR과 구분 불가라 의도적으로 제외. 사용자 데이터에서 필요 신호가
+  보이면(호출 arc 누락 보고) 다음 버전에서 entry-착지 + call-후보
+  휴리스틱 검토.
+- 같은 pc 연속 커밋은 hold로 dedup되므로(클록 샘플링), 인접 동일 pc
+  재실행(0-거리 재귀 등)은 원천적으로 1커밋으로 보임 — 엔진 한계.
 
 ## 6j. v0.20.3 — ★★ 다음 세션 최우선: landing guard (depth 붕괴의 후폭풍 차단, 사용자 재실행 대기)
 

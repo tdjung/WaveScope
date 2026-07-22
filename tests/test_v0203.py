@@ -160,23 +160,27 @@ class TestReturnGuard(unittest.TestCase):
         b = BinaryInfo()
         prog = [(0x100, 4, "jal", "ra,200 <fib>"), (0x104, 4, "j", "104"),
                 (0x200, 4, "addi", "a0,a0,-1"),            # fib
-                (0x204, 4, "jal", "ra,200 <fib>"),
-                (0x208, 4, "ret", "")]
+                (0x204, 4, "beqz", "a0,210"),
+                (0x208, 4, "jal", "ra,200 <fib>"),
+                (0x20c, 4, "addi", "a0,a0,1"),
+                (0x210, 4, "ret", "")]
         for a_, sz, m, o in prog:
             b.insns[a_] = Insn(addr=a_, size=sz, mnemonic=m, operands=o)
-        b.funcs = [Func("_start", 0x100, 0x108), Func("fib", 0x200, 0x20c)]
+        b.funcs = [Func("_start", 0x100, 0x108), Func("fib", 0x200, 0x214)]
         b._starts = [f.start for f in b.funcs]
-        flow = [0x100, 0x200, 0x204,      # fib depth 1, recurse
-                0x200, 0x208,             # fib depth 2, ret
-                0x208,                    # depth 1 ret (lands in _start)
+        flow = [0x100,
+                0x200, 0x204, 0x208,      # fib depth 1: branch NT, recurse
+                0x200, 0x204, 0x210,      # fib depth 2: branch T, ret
+                0x20c, 0x210,             # depth 1 resumes, ret
                 0x104]
         stream = [(10 + 7 * i, pc) for i, pc in enumerate(flow)]
         prof = run_sim(iter(stream), b, CL)
         # the inner recursive return (landing inside fib) must POP:
         # callee == caller exemption keeps recursion working
         self.assertEqual(prof.return_guards, 0)
-        self.assertEqual(prof.calls[(0x204, 0x200)].count, 1)
-        self.assertEqual(prof.calls[(0x204, 0x200)].inclusive[E_IR], 2)
+        self.assertEqual(prof.calls[(0x208, 0x200)].count, 1)
+        self.assertEqual(prof.calls[(0x208, 0x200)].inclusive[E_IR], 3)
+        self.assertEqual(prof.calls[(0x100, 0x200)].inclusive[E_IR], 8)
 
 
 class TestLegacyGuards(unittest.TestCase):

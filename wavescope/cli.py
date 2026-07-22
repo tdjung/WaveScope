@@ -487,6 +487,13 @@ def cmd_profile(args) -> int:
               f"landing pc was still inside{det}; each is an 'unwind-guard'/"
               f"'return-guard'/'chain-guard' event under --debug-roots",
               file=sys.stderr)
+    if getattr(prof, "discontinuity_returns", 0):
+        print(f"[wavescope] {prof.discontinuity_returns} discontinuity "
+              f"returns -- flow broke with no branch committed and landed "
+              f"exactly on an open frame's return address (macro-fused "
+              f"auipc+jr / veneer through untracked code / dropped jump "
+              f"commit); frames were closed there instead of leaking "
+              f"('disc-ret' events under --debug-roots)", file=sys.stderr)
     if args.check_inclusive:
         from .profiler import inclusive_consistency
         rows, roots = inclusive_consistency(prof, binary)

@@ -146,6 +146,14 @@ class Profile:
         self.guarded_unwinds = 0     # unwinds stopped by the landing floor
                                      # (v0.20.3: pops that would have closed
                                      # a frame the landing pc is still inside)
+        self.discontinuity_returns = 0  # v0.20.4: frames closed because a
+                                     # flow discontinuity with NO committed
+                                     # return/jump landed exactly on an open
+                                     # frame's return address (macro-fused
+                                     # auipc+jr / movw+bx style pairs where
+                                     # only the first pc is sampled, veneers
+                                     # and far-stubs running through
+                                     # untracked code, dropped jump commits)
         self.isr_open = 0            # ISR contexts alive at end of trace
 
     def _update(self, pc: int, ev: int, n: int, stack: List[FrameCtx]) -> None:
@@ -460,6 +468,7 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
 
     # level-signal state (Cortex-M IPSR); dict so step() can mutate it
     st_lvl: Dict = {"init": False, "prev": 0}
+    lost_flow = [False]     # v0.20.4: True while pcs run outside the ELF
     # epc / wfi state (simulator update_epc + wfi handlers)
     epc_init = False
     prev_epc: Optional[int] = None
@@ -467,6 +476,46 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
     is_wfi = False
     after_wfi = False
     wfi_func = None
+
+    def try_disc_ret(land_pc: int, why: str) -> bool:
+        """v0.20.4 discontinuity return: sequential flow broke without
+        any control-transfer instruction committed.  Real firmware does
+        this: macro-op-fused pairs (RISC-V auipc+jr/jalr, ARM
+        movw+movt+bx veneers) commit as one and only the first pc shows
+        up in the waveform; far-stubs run through code outside the ELF;
+        clocked sampling drops a jump commit.  If the landing equals an
+        open frame's return address, the flow HAS returned there --
+        close down to that frame (ISA-agnostic, so ARM gets the same
+        defense).  Function entries are excluded: a discontinuity into
+        an entry is a missed call or an interrupt, never a return, so
+        heuristic/epc exception detection keeps those."""
+        if not stack or land_pc in entry_set:
+            return False
+        land_f = fmap.get(land_pc, _MISS)
+        if land_f is _MISS:
+            land_f = binary.func_at(land_pc)
+            fmap[land_pc] = land_f
+        for i in range(len(stack) - 1, -1, -1):
+            if stack[i].ret_addr == land_pc:
+                j = i
+                while j > 0 and stack[j].is_tail:
+                    j -= 1
+                j = _floor_guard(prof, stack, j, land_f, land_pc, why,
+                                 upto=i)
+                prof.discontinuity_returns += 1
+                if prof.root_log is not None:
+                    _root_ev(prof, "disc-ret", stack[i].call_pc,
+                             stack[i].callee_start,
+                             f"{why}: flow lands at this frame's return "
+                             f"address 0x{land_pc:x} with no return/jump "
+                             f"committed (fused pair, hidden jump, or "
+                             f"untracked code)", i + 1)
+                if dbg is not None:
+                    dbg.note(f"disc-ret [{why}] landing 0x{land_pc:x} "
+                             f"closes frame {i}")
+                _unwind_to(prof, stack, j, why)
+                return True
+        return False
 
     def resolve(p: Pending, cur_pc: int) -> None:
         """Successor-dependent processing of the previous instruction,
@@ -485,6 +534,8 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
             # landing -- any unreachable successor left here is an
             # UNEXPLAINED discontinuity (likely speculative PC samples)
             anom, _ = _unreachable_successor(p, cur_pc)
+            if anom and try_disc_ret(cur_pc, "disc-ret(epc)"):
+                anom = False       # explained: a hidden return, not noise
             if anom:
                 prof.flow_anomalies += 1
                 if dbg is not None and (dbg._wf(p.pc) or dbg._wf(cur_pc)):
@@ -876,6 +927,11 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
         # --- 2b. heuristic ISR entry (PC-only mode) -------------------------
         if not prof.epc_mode and pending is not None:
             exc, resume = _unreachable_successor(pending, pc)
+            if exc and try_disc_ret(pc, "disc-ret(heur)"):
+                exc = False     # v0.20.4: the discontinuity lands on an
+                                # open frame's return address -- a hidden
+                                # return (fused pair / untracked code),
+                                # not an exception entry
             if exc:
                 isr_ctxs.append(IsrCtx(depth=len(stack), resume=resume,
                                        kind="heur"))
@@ -895,7 +951,16 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
         if insn is None or cls is None:
             prof.unknown_pcs += 1
             pending = None
+            lost_flow[0] = True     # v0.20.4: flow left the known text
+                                    # (veneer/far-stub into untracked
+                                    # code) -- watch the re-entry
             return
+
+        # --- 3b. flow re-acquired after untracked pcs (v0.20.4) --------------
+        if lost_flow[0]:
+            lost_flow[0] = False
+            if pending is None:
+                try_disc_ret(pc, "disc-ret(lost-flow)")
 
         # --- 4. wfi tracking (simulator wfi_out/wfi_in order) ---------------
         f_here = binary.func_at(pc)
