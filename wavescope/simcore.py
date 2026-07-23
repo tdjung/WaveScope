@@ -170,6 +170,8 @@ class SimProfiler(object):
         # diagnostics for the CLI (not part of the transcription)
         self.root_log = None
         self.cur_tick = None
+        self.debug_funcs = None    # set of function names to func-trace
+        self.func_log = None       # {"ev": [...], "omitted": n}
         self.n_isr_entries = 0
         self.n_isr_exits = 0
         self.max_exit_drain = 0
@@ -193,6 +195,24 @@ class SimProfiler(object):
         self.dropped_unknown_pc = 0
 
     def _root(self, kind, cp, callee, info, depth):
+        # v0.20.8 func-trace: full event log filtered by FUNCTION,
+        # independent of the depth-windowed root log -- --debug-roots
+        # is unreadable on call-heavy traces, this answers "show me
+        # everything that happens to THESE functions"
+        fl = self.func_log
+        if fl is not None:
+            names = set()
+            for a in (cp, callee):
+                if a is not None:
+                    i = self.infos_.get(a)
+                    if i is not None and i.func:
+                        names.add(i.func)
+            if names & self.debug_funcs:
+                if len(fl["ev"]) < 800:
+                    fl["ev"].append((self.cur_tick, kind, cp, callee,
+                                     info, depth))
+                else:
+                    fl["omitted"] += 1
         log = self.root_log
         if log is None:
             return
@@ -785,7 +805,7 @@ def _update_profile(p: SimProfiler, binary: BinaryInfo, classifier,
 
 
 def run_sim(pc_stream, binary: BinaryInfo, classifier,
-            trace_roots: int = 0) -> Profile:
+            trace_roots: int = 0, debug_funcs=None) -> Profile:
     """Run the transcribed engine over (tick, pc[, epc]) samples and
     return a legacy-shaped Profile for the shared callgrind writer.
     (--no-isr-clamp is not supported: the reference has no such switch.)
@@ -794,6 +814,9 @@ def run_sim(pc_stream, binary: BinaryInfo, classifier,
     static_cache: Dict[int, Tuple] = {}
     if trace_roots:
         p.root_log = {"n": {}, "ev": [], "depth": int(trace_roots)}
+    if debug_funcs:
+        p.debug_funcs = set(debug_funcs)
+        p.func_log = {"ev": [], "omitted": 0}
 
     prev: Optional[Tuple] = None              # (pc, epc, cyc_delta)
     last_fed = None                           # (cls, target, fallthrough)
@@ -818,8 +841,7 @@ def run_sim(pc_stream, binary: BinaryInfo, classifier,
         delta = 1 if prev_tick is None else max(1, tick - prev_tick)
         cur = (pc, epc, delta)
         if prev is not None:
-            if trace_roots:
-                p.cur_tick = prev_tick
+            p.cur_tick = prev_tick
             # ADAPTER A4: same-mepc re-entry -- the commit BEFORE the
             # one being fed supplies the interrupted context; if the
             # fed commit is an unexplained discontinuity whose source's
@@ -848,8 +870,7 @@ def run_sim(pc_stream, binary: BinaryInfo, classifier,
         prev_pc = pc
         n += 1
     if prev is not None:
-        if trace_roots:
-            p.cur_tick = prev_tick
+        p.cur_tick = prev_tick
         _update_profile(p, binary, classifier,
                         prev[0], prev[1], prev[2], None, static_cache)
     p.remain_call_stack_process()
@@ -894,6 +915,7 @@ def _to_profile(p: SimProfiler, binary: BinaryInfo, epc_seen: bool) -> Profile:
     prof.discontinuity_returns = p.n_disc_returns
     prof.exit_rejects = p.n_exit_rejects
     prof.epc_rewrites = p.n_epc_rewrites
+    prof.func_log = p.func_log
     return prof
 
 

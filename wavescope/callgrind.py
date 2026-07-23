@@ -99,8 +99,18 @@ def write(prof: Profile, out: TextIO, binary_path: str, cmd: str = "",
             continue
 
         zeros = [0] * N_EVENTS
+        cur_fl = fl
         for pc in emit_pcs:
-            _, line = b.line_at(pc)
+            pfl, line = b.line_at(pc)
+            # v0.20.8: forceinline'd header code keeps the header's LINE
+            # numbers; without switching the file context those numbers
+            # point into the wrong file ("code_line jumps somewhere
+            # random").  Simulator convention: on a file change inside a
+            # function, re-emit fl=<newfile> followed by fn=<same fn>.
+            if pfl != cur_fl:
+                out.write(f"fl={pfl}\nfn={fname(fstart)}\n")
+                cur_fl = pfl
+                last_fl = pfl
             costs = prof.self_cost.get(pc, zeros)
             out.write(f"0x{pc:x} {line} "
                       f"{' '.join(str(v) for v in costs)}\n")

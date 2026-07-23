@@ -1,7 +1,7 @@
 # WaveScope — Project Notes (대화 인수인계용)
 
 > 새 대화 시작 시: 이 파일과 README.md를 먼저 읽고 이어서 작업.
-> 마지막 업데이트: 2026-07-23, v0.20.7
+> 마지막 업데이트: 2026-07-23, v0.20.8
 
 ## 1. 프로젝트 개요
 
@@ -277,6 +277,64 @@ isr-exit/stack-saturated — 이슈 6.1용), `isr enter/exit`(clamp 표시),
 `unmatched-ret`, `flow-anomaly`. 끝에 함수별 self 합계 + incoming arc
 전수(개수·inclusive)와 incl/self 비율 summary. 사용자에게 시뮬레이터
 로그와 같은 함수 구간을 나란히 받아 대조하는 워크플로 제안할 것.
+
+## 6o. v0.20.8 — ★★ 다음 세션 우선: clone 정책 확정 필요 + inline fl + func-trace (사용자 재실행 대기)
+
+### 사용자 질문/피드백 (2026-07-23, v0.20.7 결과)
+
+1. `[clone .constprop.0]`이 뭔지 — 주소 영역이 다르고 어떨 땐 clone이,
+   어떨 땐 원본이 실행됨을 확인. **정체를 알아야 제거 여부 결정**.
+2. forceinline 헤더 코드: 같은 fn인데 fl(파일)이 다른 경우 시뮬레이터는
+   fl/fn을 추가 기재하는데 WaveScope는 누락 → "pc code_line event"의
+   code_line이 엉뚱한 곳으로 튐.
+3. ISR inclusive 이슈 잔존 — 호출이 너무 많아 --debug-roots로는 못 봄.
+   특정 함수만 추적하는 수단 필요.
+
+### 답변/수정 (v0.20.8)
+
+1. **constprop 정체**: GCC IPA-CP(상수 전파) 클론 — 일부 호출부가 상수
+   인자를 넘길 때 그 상수를 박아넣고 죽은 분기를 제거한 **별도 특수화
+   본체**(별도 주소). 상수 호출부는 클론을, 나머지는 원본을 호출 →
+   "어떨 땐 이거, 어떨 땐 저거"가 정상. **정책 변경**: v0.20.7의
+   기본-병합을 철회하고 기본 = **구분 유지 + 가독화**(raw
+   `_Z...constprop.0`도 base를 demangle해 `foo(int) [clone
+   .constprop.0]` 형태로 통일). 합산 뷰를 원하면 `--merge-clones`.
+   → **사용자 결정 대기**: 구분(기본) vs 병합(--merge-clones) 중 뭘
+   상시 쓸지 회신 요청.
+2. **inline fl 전환**: writer가 함수 내부에서 cost line의 소스 파일이
+   바뀌면 시뮬레이터 관례대로 `fl=<새파일>` + `fn=<같은 함수>`를 재기재
+   (양방향 전환 모두). last_fl 연동으로 다음 함수 헤더도 정합.
+3. **func-trace**: `--debug-func NAME[,NAME]`이 이제 default 엔진에서
+   동작 — 지목 함수(정확명/0x주소/suffix 매칭, legacy와 동일한 해석기)
+   가 caller 혹은 callee로 등장하는 **모든 스택 이벤트**(push/pop/
+   guard/exit-reject/epc-rewrite/tail-noframe/isr-*)를 depth 제한 없이
+   최대 800개 기록, stderr에 "[wavescope] func-trace" 섹션으로 출력.
+   --debug-roots 없이도 동작(cur_tick 상시 유지로 변경). ISR inclusive
+   추적용: `--debug-func 문제함수,__riscv_restore_0`.
+
+- tests: test_v0208.py(fl 전환 양방향/단일파일 1회, func-trace 필터링/
+  틱/비활성) + test_v0207 clone 테스트를 신정책으로 갱신. 전체 200
+  green. `--merge-clones` 플래그, load_binary(merge_clones=) 스레딩.
+
+### 사용자 회신 요청
+
+1. clone: 구분(기본, 특수화별 비용 분리) vs 병합(--merge-clones, 함수
+   단위 합산) — 어느 쪽을 상시 정책으로 할지. (시뮬레이터가 어떻게
+   표기하는지도 알려주면 diff 정합 기준으로 맞춤.)
+2. code_line 튀는 증상이 fl 전환으로 해소됐는지 (헤더 파일명이 fl로
+   찍히는지).
+3. **잔여 ISR inclusive**: `--debug-func <문제 ISR의 callee>,
+   __riscv_restore_0`로 재실행해 func-trace 섹션 전체를 회신 —
+   tail-noframe/isr-exit/exit-reject 중 무엇이 찍히는지가 다음 병소
+   판정 데이터. (지금까지: 가짜 exit 3종(공유 millicode·소프트 mepc
+   재기록·공유 callee 간접 도달)을 잡았고 네 번째 패턴이 남아있는 것.)
+
+### 유의
+
+- func-trace는 스택 이벤트만 기록(비용 라인 아님). 800개 초과분은
+  생략 카운트로 표시 — 필요 시 한도 상향 요청.
+- clone 구분 모드에서 엔진 내부 이름 비교(A5a 등)는 clone과 원본을
+  다른 함수로 취급 — 의미상 올바름(실제 다른 코드).
 
 ## 6n. v0.20.7 — ★★★ 다음 세션 최우선: 공유-callee 가짜 exit (A7 간접-도달 구멍 봉합) + clone 심볼 + jcnd 순서 (사용자 재실행 대기)
 

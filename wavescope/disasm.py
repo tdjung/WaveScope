@@ -97,29 +97,45 @@ def _parse_disasm_fields(line):
     return (int(m.group(1), 16), enc_tokens, sp[0].lower(),
             sp[1].strip() if len(sp) > 1 else "")
 _LABEL_RE = re.compile(r"^([0-9a-fA-F]+) <(.+)>:\s*$")
-_CLONE_RE = re.compile(r"\s*\[clone\s+[^\]]*\]")
+_CLONE_ANN_RE = re.compile(r"\s*\[clone\s+(\.[^\]]*)\]")
 _GCC_SUFFIX_RE = re.compile(
     r"(\.(?:constprop|part|isra|cold|likely|unlikely|lto_priv)"
     r"(?:\.\d+)?)+$")
 
 
-def _clean_symbol(name: str) -> str:
-    """Normalize compiler-generated clone symbols so a function shows
-    up ONCE under its real name.  objdump -C renders clones as
-    'foo(int) [clone .constprop.0]' when it can demangle them, and as
-    the raw '_Z3fooi.constprop.0' when the trailing GCC suffix defeats
-    its demangler (the user-reported duplicated, undemangled entry).
-    Both collapse to the base name here; identically named functions
-    are aggregated by the callgrind viewer."""
-    s = _CLONE_RE.sub("", name).strip()
-    s = _GCC_SUFFIX_RE.sub("", s)
-    return s or name
+def _split_clone(name: str):
+    """'foo(int) [clone .constprop.0]' -> ('foo(int)', '.constprop.0');
+    '_Z3fooi.constprop.0' -> ('_Z3fooi', '.constprop.0');
+    'main' -> ('main', None)."""
+    m = _CLONE_ANN_RE.search(name)
+    if m:
+        base = _CLONE_ANN_RE.sub("", name).strip()
+        return (base or name), m.group(1)
+    m = _GCC_SUFFIX_RE.search(name)
+    if m and m.start() > 0:
+        return name[:m.start()], m.group(0)
+    return name, None
+
+
+def _clean_symbol(name: str, merge_clones: bool = False) -> str:
+    """Normalize compiler clone symbols.  A .constprop/.part/.isra
+    clone is a REAL separate specialization (different address, own
+    code body -- e.g. constprop bakes a constant argument in), so by
+    default clones stay DISTINCT but readable: the base is demanglable
+    again and the annotation is kept in objdump's own
+    ' [clone .constprop.0]' form.  With merge_clones the annotation is
+    dropped entirely so the viewer aggregates clone + original under
+    one name."""
+    base, ann = _split_clone(name)
+    if ann and not merge_clones:
+        return f"{base} [clone {ann}]"
+    return base
 
 
 def _batch_demangle(names):
-    """Demangle residual '_Z...' names (clone suffix already stripped)
-    with c++filt; returns a dict of successful translations.  Missing
-    c++filt degrades gracefully to the stripped mangled names."""
+    """Demangle residual '_Z...' BASE names with c++filt; returns a
+    dict of successful translations.  Missing c++filt degrades
+    gracefully to the (suffix-stripped) mangled names."""
     todo = sorted({n for n in names if n.startswith("_Z")})
     if not todo:
         return {}
@@ -177,7 +193,8 @@ def _tool(prefix: str, name: str) -> str:
 
 
 def load_binary(elf_path: str, toolchain_prefix: str = "",
-                with_lines: bool = True, demangle: bool = True) -> BinaryInfo:
+                with_lines: bool = True, demangle: bool = True,
+                merge_clones: bool = False) -> BinaryInfo:
     info = BinaryInfo()
     objdump = _tool(toolchain_prefix, "objdump")
     dm = ["-C"] if demangle else []
@@ -271,13 +288,21 @@ def load_binary(elf_path: str, toolchain_prefix: str = "",
             end = min(end, nxt) if size else end
             if end <= start:
                 end = nxt
-        info.funcs.append(Func(name=_clean_symbol(name), start=start,
-                               end=max(end, start + 2)))
-    dem = _batch_demangle([f.name for f in info.funcs])
+        info.funcs.append(Func(name=_clean_symbol(name, merge_clones),
+                               start=start, end=max(end, start + 2)))
+    # demangle bases that objdump left raw (its demangler chokes on
+    # GCC clone suffixes); the clone annotation, if kept, is reattached
+    _bases = {}
+    for f in info.funcs:
+        base, ann = _split_clone(f.name)
+        _bases[id(f)] = (base, ann)
+    dem = _batch_demangle([b_ for b_, _ in _bases.values()])
     if dem:
         for f in info.funcs:
-            if f.name in dem:
-                f.name = dem[f.name]
+            base, ann = _bases[id(f)]
+            if base in dem:
+                f.name = dem[base] + (f" [clone {ann}]"
+                                      if ann and not merge_clones else "")
     info._starts = [f.start for f in info.funcs]
     info.data_syms = data_syms
 

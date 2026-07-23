@@ -114,23 +114,34 @@ class TestSharedCalleeFalseExit(unittest.TestCase):
 
 
 class TestCloneSymbols(unittest.TestCase):
-    def test_demangled_clone_annotation_stripped(self):
-        self.assertEqual(_clean_symbol("foo(int) [clone .constprop.0]"),
-                         "foo(int)")
-        self.assertEqual(
-            _clean_symbol("ns::bar(char*) const [clone .part.1]"),
-            "ns::bar(char*) const")
+    """v0.20.8 policy: a clone is a REAL separate specialization, so by
+    default it stays DISTINCT with a normalized ' [clone .xxx]'
+    annotation (raw GCC suffixes are converted to that form so the base
+    demangles); --merge-clones aggregates under the base name."""
 
-    def test_raw_gcc_suffixes_stripped(self):
-        self.assertEqual(_clean_symbol("_Z3fooi.constprop.0"), "_Z3fooi")
+    def test_default_keeps_clones_distinct_and_normalized(self):
+        self.assertEqual(_clean_symbol("foo(int) [clone .constprop.0]"),
+                         "foo(int) [clone .constprop.0]")
+        self.assertEqual(_clean_symbol("_Z3fooi.constprop.0"),
+                         "_Z3fooi [clone .constprop.0]")
         self.assertEqual(_clean_symbol("helper.isra.0.constprop.2"),
-                         "helper")
-        self.assertEqual(_clean_symbol("tables.cold"), "tables")
+                         "helper [clone .isra.0.constprop.2]")
+
+    def test_merge_collapses_to_base(self):
+        for raw in ("foo(int) [clone .constprop.0]",
+                    "foo(int)"):
+            self.assertEqual(_clean_symbol(raw, merge_clones=True),
+                             "foo(int)")
+        self.assertEqual(_clean_symbol("_Z3fooi.constprop.0",
+                                       merge_clones=True), "_Z3fooi")
+        self.assertEqual(_clean_symbol("tables.cold", merge_clones=True),
+                         "tables")
 
     def test_plain_names_untouched(self):
         for n in ("main", "__riscv_restore_0", "ns::f(int)",
                   "operator()(int)", "v2.1_handler"):
             self.assertEqual(_clean_symbol(n), n)
+            self.assertEqual(_clean_symbol(n, merge_clones=True), n)
 
     @unittest.skipIf(shutil.which("c++filt") is None, "c++filt missing")
     def test_batch_demangle(self):

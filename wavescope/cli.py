@@ -225,7 +225,8 @@ def cmd_profile(args) -> int:
     print(f"[wavescope] loading binary: {args.elf}", file=sys.stderr)
     binary = load_binary(args.elf, args.toolchain_prefix,
                          with_lines=not args.no_lines,
-                         demangle=not args.no_demangle)
+                         demangle=not args.no_demangle,
+                         merge_clones=args.merge_clones)
     print(f"[wavescope]   {len(binary.insns)} instructions, "
           f"{len(binary.funcs)} functions"
           + (f" ({len(binary.data_syms)} in-text data objects excluded, "
@@ -309,15 +310,12 @@ def cmd_profile(args) -> int:
             print("[wavescope] note: --no-isr-clamp is ignored by the sim "
                   "engine (the reference has no such switch)",
                   file=sys.stderr)
-        if args.debug_func and args.engine == "default":
-            print("[wavescope] note: --debug-func traces the legacy "
-                  "engine; use --engine both to run it alongside",
-                  file=sys.stderr)
+
     debug = None
     dbg_out = None
+    watch = []
     if args.debug_func:
         wanted = [w for arg in args.debug_func for w in arg.split(",") if w]
-        watch = []
         for w in wanted:
             f = None
             if w.lower().startswith("0x"):
@@ -361,7 +359,9 @@ def cmd_profile(args) -> int:
         print("[wavescope] engine: default (transcription of "
               "docs/simulator_reference.md)", file=sys.stderr)
         prof = run_sim(samples, binary, classifier,
-                       trace_roots=args.debug_roots)
+                       trace_roots=args.debug_roots,
+                       debug_funcs=({f.name for f in watch}
+                                    if args.debug_func else None))
         if getattr(prof, "sim_dropped_unknown", 0):
             print(f"[wavescope] sim: {prof.sim_dropped_unknown} event "
                   f"charges dropped at pcs outside infos_ (reference "
@@ -533,6 +533,24 @@ def cmd_profile(args) -> int:
                 for ev in cuts[:10]:
                     print(f"[wavescope]   t={ev[0]} depth={ev[5]} "
                           f"[{ev[4]}]", file=sys.stderr)
+
+    flog = getattr(prof, "func_log", None)
+    if flog is not None:
+        evs = flog["ev"]
+        print(f"[wavescope] func-trace: {len(evs)} stack events touch "
+              f"the watched function(s)"
+              + (f" (+{flog['omitted']} omitted past 800)"
+                 if flog.get("omitted") else ""), file=sys.stderr)
+        def _fnm(a):
+            if a is None:
+                return "?"
+            f = binary.func_at(a)
+            return f"{f.name}@0x{a:x}" if f else hex(a)
+        for ev in evs:
+            tick, kind, cp, callee, info, depth = ev[:6]
+            print(f"[wavescope]   t={tick} {kind:<13} d={depth} "
+                  f"{_fnm(cp)} -> {_fnm(callee)}  [{info}]",
+                  file=sys.stderr)
 
     if args.check_inclusive:
         from .profiler import inclusive_consistency
@@ -758,6 +776,11 @@ def main(argv=None) -> int:
                          "ticks, reasons, ISR enter/exit events and "
                          "tail-chain pops -- diagnoses roots whose "
                          "inclusive comes out too small")
+    pp.add_argument("--merge-clones", action="store_true",
+                    help="aggregate compiler clones (.constprop/.part/"
+                         ".isra) under the base function name instead "
+                         "of keeping them distinct with a "
+                         "'[clone .xxx]' annotation")
     pp.add_argument("--engine", choices=("default", "legacy", "both",
                                          "sim"),
                     default="default",
