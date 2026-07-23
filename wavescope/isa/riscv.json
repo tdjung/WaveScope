@@ -1,137 +1,140 @@
 {
- "isa": "riscv",
- "description": "RISC-V RV32/RV64 IMAFDC, binutils objdump mnemonics (incl. pseudo-instructions)",
- "insn_sizes": [
-  2,
-  4
- ],
- "classes": {
-  "cond_branch": [
-   "beq",
-   "bne",
-   "blt",
-   "bge",
-   "bltu",
-   "bgeu",
-   "beqz",
-   "bnez",
-   "blez",
-   "bgez",
-   "bltz",
-   "bgtz",
-   "bgt",
-   "ble",
-   "bgtu",
-   "bleu",
-   "c.beqz",
-   "c.bnez"
+  "isa": "riscv",
+  "description": "RISC-V RV32/RV64 IMAFDC, binutils objdump mnemonics (incl. pseudo-instructions)",
+  "insn_sizes": [
+    2,
+    4
   ],
-  "direct_jump": [
-   "j",
-   "jal",
-   "c.j",
-   "c.jal",
-   "tail",
-   "call"
+  "classes": {
+    "cond_branch": [
+      "beq",
+      "bne",
+      "blt",
+      "bge",
+      "bltu",
+      "bgeu",
+      "beqz",
+      "bnez",
+      "blez",
+      "bgez",
+      "bltz",
+      "bgtz",
+      "bgt",
+      "ble",
+      "bgtu",
+      "bleu",
+      "c.beqz",
+      "c.bnez"
+    ],
+    "direct_jump": [
+      "j",
+      "jal",
+      "c.j",
+      "c.jal",
+      "tail",
+      "call"
+    ],
+    "indirect_jump": [
+      "jr",
+      "jalr",
+      "ret",
+      "c.jr",
+      "c.jalr"
+    ],
+    "load": [
+      "lb",
+      "lh",
+      "lw",
+      "ld",
+      "lbu",
+      "lhu",
+      "lwu",
+      "flw",
+      "fld",
+      "flh",
+      "flq",
+      "c.lw",
+      "c.ld",
+      "c.lwsp",
+      "c.ldsp",
+      "c.flw",
+      "c.fld",
+      "c.flwsp",
+      "c.fldsp",
+      "lr.w",
+      "lr.d"
+    ],
+    "store": [
+      "sb",
+      "sh",
+      "sw",
+      "sd",
+      "fsw",
+      "fsd",
+      "fsh",
+      "fsq",
+      "c.sw",
+      "c.sd",
+      "c.swsp",
+      "c.sdsp",
+      "c.fsw",
+      "c.fsd",
+      "c.fswsp",
+      "c.fsdsp",
+      "sc.w",
+      "sc.d"
+    ],
+    "return": [
+      "ret",
+      "mret",
+      "sret",
+      "uret"
+    ]
+  },
+  "prefix_classes": {
+    "amo": [
+      "load",
+      "store"
+    ]
+  },
+  "link": {
+    "convention": "operand",
+    "registers": [
+      "ra",
+      "x1",
+      "x5",
+      "t0"
+    ],
+    "implied_link_mnemonics": [
+      "call",
+      "c.jal"
+    ],
+    "single_operand_implies_link": [
+      "jal",
+      "jalr"
+    ],
+    "no_link_mnemonics": [
+      "jr",
+      "c.jr",
+      "ret",
+      "mret",
+      "sret",
+      "uret",
+      "tail",
+      "j",
+      "c.j"
+    ]
+  },
+  "unknown_mnemonics": [
+    ".word",
+    ".short",
+    ".insn",
+    ".2byte",
+    ".4byte",
+    "unimp"
   ],
-  "indirect_jump": [
-   "jr",
-   "jalr",
-   "ret",
-   "c.jr",
-   "c.jalr"
-  ],
-  "load": [
-   "lb",
-   "lh",
-   "lw",
-   "ld",
-   "lbu",
-   "lhu",
-   "lwu",
-   "flw",
-   "fld",
-   "flh",
-   "flq",
-   "c.lw",
-   "c.ld",
-   "c.lwsp",
-   "c.ldsp",
-   "c.flw",
-   "c.fld",
-   "c.flwsp",
-   "c.fldsp",
-   "lr.w",
-   "lr.d"
-  ],
-  "store": [
-   "sb",
-   "sh",
-   "sw",
-   "sd",
-   "fsw",
-   "fsd",
-   "fsh",
-   "fsq",
-   "c.sw",
-   "c.sd",
-   "c.swsp",
-   "c.sdsp",
-   "c.fsw",
-   "c.fsd",
-   "c.fswsp",
-   "c.fsdsp",
-   "sc.w",
-   "sc.d"
-  ],
-  "return": [
-   "ret",
-   "mret",
-   "sret",
-   "uret"
+  "custom_encodings": [],
+  "idle_mnemonics": [
+    "wfi"
   ]
- },
- "prefix_classes": {
-  "amo": [
-   "load",
-   "store"
-  ]
- },
- "link": {
-  "convention": "operand",
-  "registers": [
-   "ra",
-   "x1",
-   "x5",
-   "t0"
-  ],
-  "implied_link_mnemonics": [
-   "call",
-   "c.jal"
-  ],
-  "single_operand_implies_link": [
-   "jal",
-   "jalr"
-  ],
-  "no_link_mnemonics": [
-   "jr",
-   "c.jr",
-   "ret",
-   "mret",
-   "sret",
-   "uret",
-   "tail",
-   "j",
-   "c.j"
-  ]
- },
- "unknown_mnemonics": [
-  ".word",
-  ".short",
-  ".insn",
-  ".2byte",
-  ".4byte",
-  "unimp"
- ],
- "custom_encodings": []
 }

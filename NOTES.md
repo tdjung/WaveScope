@@ -1,7 +1,7 @@
 # WaveScope — Project Notes (대화 인수인계용)
 
 > 새 대화 시작 시: 이 파일과 README.md를 먼저 읽고 이어서 작업.
-> 마지막 업데이트: 2026-07-23, v0.20.10
+> 마지막 업데이트: 2026-07-23, v0.20.11
 
 ## 1. 프로젝트 개요
 
@@ -277,6 +277,67 @@ isr-exit/stack-saturated — 이슈 6.1용), `isr enter/exit`(clamp 표시),
 `unmatched-ret`, `flow-anomaly`. 끝에 함수별 self 합계 + incoming arc
 전수(개수·inclusive)와 incl/self 비율 summary. 사용자에게 시뮬레이터
 로그와 같은 함수 구간을 나란히 받아 대조하는 워크플로 제안할 것.
+
+## 6r. v0.20.11 — 부팅 cycle 클램프 + ISA-일반 idle + ★ ARM 리스크 감사 (사용자 확인 대기)
+
+### 사용자 지시 (2026-07-23)
+
+1. clock-on→첫 fetch 사이 cycle을 첫 명령이 흡수 → **첫 명령 Cy=1로**
+   (fetch 신호 추가 없이). 이후 clock 온오프는 wfi 처리로 충분.
+2. 시뮬레이터의 wfi 감지는 "wfi" 리터럴(RISC-V 종속) — WaveScope는?
+3. RISC-V 결과로만 검증 중 — ARM에서 오차 날 부분 사전 검토 요청.
+
+### v0.20.11 수정
+
+1. **부팅 경계 클램프**: run_sim 피더에서 n==1(두 번째 distinct 커밋)의
+   delta를 1로 — 홀드가 prev_tick을 전진시키지 않아 부팅 홀드 전체가
+   두 번째 커밋에 실리던 것을 차단. 부팅 갭은 **미계상**(총 Cy에서
+   제외), 이후 갭(wfi 수면)은 기존대로 계상. 테스트로 양쪽 고정.
+2. **idle의 ISA-일반화**: ISA json에 idle_mnemonics 추가(riscv: wfi /
+   armv7m: wfi,wfe / aarch64: wfi,wfe,wfit,wfet), classifier가 노출,
+   SimInfo.is_idle로 프리컴퓨트(.n/.w 접미 정규화 포함). 레퍼런스의
+   "wfi" 리터럴 비교를 대체 — **시뮬레이터에도 동일 일반화 권장**.
+3. **Thumb 비트 마스크**(cli): ARM 계열 ISA에서 pc 신호의 LSB=1
+   (interworking 비트)을 마스크 — 안 하면 전 명령 unknown_pcs.
+
+### ARM 리스크 감사 (사전 검토 결과, 중요도순)
+
+A. **ISR 기전 전체가 mepc 중심** — Cortex-M은 mepc CSR이 없고 예외
+   복귀가 EXC_RETURN 매직값(0xFFFFFFF1 등)으로의 bx lr/pop pc.
+   epc 신호 없는 ARM 트레이스에선 default 엔진의 ISR entry/exit 감지가
+   **전무** → 핸들러 frame이 현재 스택에 적층, A6 disc-ret이 부분
+   치유. → ARM용 휴리스틱 필요(EXC_RETURN 범위 착지 감지 + NVIC 신호
+   활용). **사용자에게 ARM 파형의 가용 신호 목록 질의 필요.**
+B. **xret 부재**: XRET={mret,sret,uret,eret} — aarch64 eret ✓,
+   Cortex-M 해당 없음 → prev_was_xret 항상 False. (A 해결과 연동:
+   EXC_RETURN 착지를 xret-등가로 처리하는 게 자연스러움. 단, 매직값이
+   커밋 pc 스트림에 실제로 찍히는지 파형 확인 필요 — unknown pc라
+   flow_lost 경유로 우연히 동작할 수도.)
+C. **helper 분류 riscv 전용**: __riscv_save/restore만 인식. ARM은
+   millicode가 없지만 **veneer(`__*_veneer`, long-branch 트램폴린)**와
+   `__gnu_thumb1_case_*`(switch 헬퍼), `__aeabi_*` 런타임이 유사 역할
+   → 현재는 일반 함수 취급이라 far-call마다 여분 frame. veneer 패턴을
+   helper로 등록 검토.
+D. **IT 블록 조건부 실행**: 코어에 따라 skip된 조건부 명령도 커밋으로
+   찍힐 수 있음 → 조건부 bx lr의 not-taken이 return으로 오독될 위험.
+   단 A5a 가드(착지가 callee 내부면 pop 금지)가 이 케이스를 정확히
+   막아줌을 확인 — 실파형으로 재검증만 필요.
+E. 조건 접미(bne, bxne 등) 분류: json cond_suffixes 존재 — 실파형
+   검증 항목.
+F. pc_write 복귀(pop {pc}/ldm/mov pc,lr) ✓, blx 간접 ✓, .word 리터럴
+   풀 ✓ — json 커버 확인됨. disc-ret/landing guard 등 엔진 레벨
+   가드는 전부 ISA-무관 ✓ (armv7m veneer 테스트 기존 존재).
+G. 사이클: Thumb 2/4바이트 크기는 insn.size 경유로 일반 ✓.
+
+- tests/test_v0211.py 4종(부팅 클램프/후속 갭 계상/riscv·arm idle).
+  전체 209 green.
+
+### 사용자 회신 요청
+
+1. 부팅 클램프 동작 확인 (첫 명령 Cy=1, 총 Cy에서 부팅 갭 제외).
+2. ARM 파형에 어떤 신호가 있는지 (epc 등가물? EXC_RETURN이 pc
+   스트림에 찍히는지? NVIC active 신호?) — 감사 항목 A/B의 설계 입력.
+3. 시뮬레이터 wfi 감지도 idle 리스트 방식으로 일반화 권장 (wfe 등).
 
 ## 6q. v0.20.10 — 상태: ISR inclusive 사가 종결 ✅ / auipc Bi/Bim 철회
 

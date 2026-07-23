@@ -60,13 +60,14 @@ TRACE_Dw = E_DW
 
 class SimInfo(object):
     """infos_ entry: {event[], debug_info(func/assembly), func_type}"""
-    __slots__ = ("event", "func", "assembly", "func_type")
+    __slots__ = ("event", "func", "assembly", "func_type", "is_idle")
 
     def __init__(self, func="", assembly="", func_type=FT_NORMAL):
         self.event = [0] * N_EVENTS
         self.func = func
         self.assembly = assembly
         self.func_type = func_type
+        self.is_idle = False       # wfi/wfe/... (classifier-driven)
 
 
 class CallStackEntry(object):
@@ -462,7 +463,11 @@ class SimProfiler(object):
 
     # ------------------------------------------------------------------
     def wfi_in_handler(self, info: SimInfo) -> None:
-        if (not self.is_wfi) and info.assembly.startswith("wfi"):
+        # v0.20.11: ISA-generic -- the reference hardcodes the literal
+        # "wfi" keyword (RISC-V only); the flag is precomputed from the
+        # classifier's idle_mnemonics (ARM: wfi AND wfe; aarch64 adds
+        # wfit/wfet), with .n/.w suffixes normalized
+        if (not self.is_wfi) and info.is_idle:
             self.wfi_func = info.func
             self.is_wfi = True
             self.after_wfi = True
@@ -831,6 +836,12 @@ def run_sim(pc_stream, binary: BinaryInfo, classifier,
     if debug_funcs:
         p.debug_funcs = set(debug_funcs)
         p.func_log = {"ev": [], "omitted": 0}
+    idle_set = getattr(classifier, "idle_mnemonics", None) or {"wfi"}
+    for _info in p.infos_.values():
+        a = _info.assembly
+        if a:
+            m = a.split(None, 1)[0].split(".")[0]
+            _info.is_idle = m in idle_set
 
     prev: Optional[Tuple] = None              # (pc, epc, cyc_delta)
     last_fed = None                           # (cls, target, fallthrough)
@@ -853,6 +864,15 @@ def run_sim(pc_stream, binary: BinaryInfo, classifier,
                 # and let update_epc fire
                 p.prev_epc = epc
         delta = 1 if prev_tick is None else max(1, tick - prev_tick)
+        if n == 1:
+            # v0.20.11 boot boundary: the gap between clock-on and the
+            # first real progress is reset/fetch latency with no
+            # attributable instruction (the pc signal merely holds its
+            # first value) -- without an extra fetch signal it cannot
+            # be split, so it is dropped: the first instruction takes
+            # Cy=1 (user decision).  Later clock gaps are real sleeps
+            # and stay charged (wfi/idle machinery handles them).
+            delta = 1
         cur = (pc, epc, delta)
         if prev is not None:
             p.cur_tick = prev_tick

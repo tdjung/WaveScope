@@ -1,28 +1,136 @@
 {
   "isa": "aarch64",
   "description": "ARMv8-A AArch64, binutils objdump mnemonics",
-  "insn_sizes": [4],
+  "insn_sizes": [
+    4
+  ],
   "classes": {
-    "cond_branch": ["cbz", "cbnz", "tbz", "tbnz"],
-    "direct_jump": ["b", "bl"],
-    "indirect_jump": ["br", "blr", "ret", "eret", "braa", "brab", "blraa", "blrab", "retaa", "retab"],
-    "load": ["ldr", "ldur", "ldp", "ldpsw", "ldnp"],
-    "store": ["str", "stur", "stp", "stnp"],
-    "return": ["ret", "eret", "retaa", "retab"]
+    "cond_branch": [
+      "cbz",
+      "cbnz",
+      "tbz",
+      "tbnz"
+    ],
+    "direct_jump": [
+      "b",
+      "bl"
+    ],
+    "indirect_jump": [
+      "br",
+      "blr",
+      "ret",
+      "eret",
+      "braa",
+      "brab",
+      "blraa",
+      "blrab",
+      "retaa",
+      "retab"
+    ],
+    "load": [
+      "ldr",
+      "ldur",
+      "ldp",
+      "ldpsw",
+      "ldnp"
+    ],
+    "store": [
+      "str",
+      "stur",
+      "stp",
+      "stnp"
+    ],
+    "return": [
+      "ret",
+      "eret",
+      "retaa",
+      "retab"
+    ]
   },
-  "cond_branch_prefixes": ["b."],
+  "cond_branch_prefixes": [
+    "b."
+  ],
   "prefix_classes": {
-    "ldr": ["load"], "ldu": ["load"], "ldp": ["load"], "ldx": ["load"],
-    "lda": ["load"], "ldn": ["load"], "ld1": ["load"], "ld2": ["load"],
-    "ld3": ["load"], "ld4": ["load"],
-    "str": ["store"], "stu": ["store"], "stp": ["store"], "stx": ["store"],
-    "stl": ["store"], "stn": ["store"], "st1": ["store"], "st2": ["store"],
-    "st3": ["store"], "st4": ["store"]
+    "ldr": [
+      "load"
+    ],
+    "ldu": [
+      "load"
+    ],
+    "ldp": [
+      "load"
+    ],
+    "ldx": [
+      "load"
+    ],
+    "lda": [
+      "load"
+    ],
+    "ldn": [
+      "load"
+    ],
+    "ld1": [
+      "load"
+    ],
+    "ld2": [
+      "load"
+    ],
+    "ld3": [
+      "load"
+    ],
+    "ld4": [
+      "load"
+    ],
+    "str": [
+      "store"
+    ],
+    "stu": [
+      "store"
+    ],
+    "stp": [
+      "store"
+    ],
+    "stx": [
+      "store"
+    ],
+    "stl": [
+      "store"
+    ],
+    "stn": [
+      "store"
+    ],
+    "st1": [
+      "store"
+    ],
+    "st2": [
+      "store"
+    ],
+    "st3": [
+      "store"
+    ],
+    "st4": [
+      "store"
+    ]
   },
   "link": {
     "convention": "mnemonic",
-    "mnemonics": ["bl", "blr", "blraa", "blrab"]
+    "mnemonics": [
+      "bl",
+      "blr",
+      "blraa",
+      "blrab"
+    ]
   },
-  "unknown_mnemonics": [".word", ".inst", "udf"],
-  "custom_encodings": []
+  "unknown_mnemonics": [
+    ".word",
+    ".inst",
+    "udf"
+  ],
+  "custom_encodings": [],
+  "idle_mnemonics": [
+    "wfi",
+    "wfe",
+    "wfit",
+    "wfet"
+  ]
 }

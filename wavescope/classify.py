@@ -98,6 +98,10 @@ class TableClassifier:
         self.pc_jmp_prefixes: List[str] = pw.get("jump_mnemonic_prefixes", [])
 
         self.unknown_mnemonics: Set[str] = set(spec.get("unknown_mnemonics", []))
+        # sleep/idle instructions (wfi/wfe/...): the profiler treats a
+        # clock gap after one of these as a sleep, not a stall
+        self.idle_mnemonics: Set[str] = set(
+            spec.get("idle_mnemonics", ["wfi"]))
         self.encodings: List[EncodingRule] = [
             EncodingRule(name=e.get("name", "?"),
                          mask=int(str(e["mask"]), 0),

@@ -358,6 +358,10 @@ def cmd_profile(args) -> int:
         from .simcore import compare_profiles, run_sim
         print("[wavescope] engine: default (transcription of "
               "docs/simulator_reference.md)", file=sys.stderr)
+        if getattr(args, "isa", "riscv").startswith(("arm", "aarch")):
+            # Thumb interworking: pc signals often carry the Thumb bit
+            # (LSB=1); unmasked they miss every insns[] lookup
+            samples = ((s[0], s[1] & ~1) + tuple(s[2:]) for s in samples)
         prof = run_sim(samples, binary, classifier,
                        trace_roots=args.debug_roots,
                        debug_funcs=({f.name for f in watch}
