@@ -494,6 +494,36 @@ def cmd_profile(args) -> int:
               f"auipc+jr / veneer through untracked code / dropped jump "
               f"commit); frames were closed there instead of leaking "
               f"('disc-ret' events under --debug-roots)", file=sys.stderr)
+    if getattr(prof, "exit_rejects", 0):
+        print(f"[wavescope] {prof.exit_rejects} ISR-exit arrivals rejected "
+              f"-- pc hit the saved resume address through the handler's "
+              f"OWN flow (shared __riscv_save/restore millicode or shared "
+              f"subroutines between handler and interrupted code); the "
+              f"real exit is taken at the xret instead ('exit-reject' "
+              f"events under --debug-roots)", file=sys.stderr)
+
+    if args.debug_roots:
+        # judgment aid: an inclusive that is too small on the root chain
+        # means a root-depth frame was closed BEFORE the end-of-trace
+        # drain; list every such pop with its reason
+        for label, p_ in ((args.engine if args.engine != "both" else "sim",
+                           prof),
+                          ("legacy", legacy_prof)):
+            log = getattr(p_, "root_log", None) if p_ is not None else None
+            if not log:
+                continue
+            cuts = [ev for ev in log["ev"]
+                    if ev[1] == "pop" and ev[5] is not None and ev[5] <= 2
+                    and "drain" not in str(ev[4])]
+            if cuts:
+                print(f"[wavescope] {label}: root-chain frames closed "
+                      f"MID-RUN {len(cuts)} time(s) -- these cuts are why "
+                      f"root inclusives come out small; the [reason] names "
+                      f"the mechanism:", file=sys.stderr)
+                for ev in cuts[:10]:
+                    print(f"[wavescope]   t={ev[0]} depth={ev[5]} "
+                          f"[{ev[4]}]", file=sys.stderr)
+
     if args.check_inclusive:
         from .profiler import inclusive_consistency
         rows, roots = inclusive_consistency(prof, binary)

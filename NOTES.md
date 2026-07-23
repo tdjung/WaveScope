@@ -1,7 +1,7 @@
 # WaveScope — Project Notes (대화 인수인계용)
 
 > 새 대화 시작 시: 이 파일과 README.md를 먼저 읽고 이어서 작업.
-> 마지막 업데이트: 2026-07-22, v0.20.4
+> 마지막 업데이트: 2026-07-23, v0.20.5
 
 ## 1. 프로젝트 개요
 
@@ -277,6 +277,81 @@ isr-exit/stack-saturated — 이슈 6.1용), `isr enter/exit`(clamp 표시),
 `unmatched-ret`, `flow-anomaly`. 끝에 함수별 self 합계 + incoming arc
 전수(개수·inclusive)와 incl/self 비율 summary. 사용자에게 시뮬레이터
 로그와 같은 함수 구간을 나란히 받아 대조하는 워크플로 제안할 것.
+
+## 6l. v0.20.5 — ★★★ 다음 세션 최우선: 공유 millicode 가짜 ISR exit (사가의 유력 근본 병소, 사용자 재실행 대기)
+
+### 사용자 피드백 (2026-07-23, v0.20.4 실행 결과)
+
+- ✅ auipc return 해결 확인 (sim 기준).
+- ❌ sim: ISR 발생 시 __riscv_restore_x가 **진입/호출 카운트는 보이는데
+  inclusive 이벤트가 빠짐**. ISR_A→ISR_B 내부 호출의 ISR_B 비용도
+  ISR_A inclusive에서 누락.
+- ❌ legacy: _start/SYS_BSP_reset/SYS_system_startup **inclusive가 너무
+  작음** (중간에 누적이 끊김). 사용자: legacy는 sim 로직과 달라 유지비
+  부담 → 몇 번 더 고쳐보고 안 되면 폐기 예정 (코드는 보존).
+
+### 근본 원인 (합성 스윕으로 확정: 인터럽트를 모든 명령 지점에 주입)
+
+**공유 millicode 가짜 ISR exit.** 인터럽트가 `jal t0,__riscv_save_0`
+(또는 save/restore 내부)에서 걸리면 mepc = **공유 helper 내부 주소**.
+핸들러 자신의 프롤로그도 같은 helper를 호출 → 핸들러 실행 중 pc가
+저장된 resume 주소와 일치 → 양 엔진 모두 `pc==epc`만 보고 **가짜
+exit** 선언:
+- sim: ISR-로컬 스택 조기 drain → 핸들러 arc들이 count만 남고
+  inclusive 유실 (사용자 증상 그대로). 이후 핸들러 잔여 실행이
+  복원된 normal 스택 위에서 진행되며 main frame들을 오염.
+- legacy: isr-exit(epc) unwind가 핸들러 frame 절단 + 이후 핸들러의
+  restore return들이 root 인접 frame을 잠식 → **root inclusive
+  과소** (사용자 1번). 과거 t=145 조기 pop([사유]가 isr-exit(epc)일
+  가능성 높음)의 유력 정체이기도 함.
+- 공유 millicode뿐 아니라 핸들러와 피인터럽트 코드가 **공유하는 모든
+  서브루틴**에서 동일 발생 (jal ra,F 중 인터럽트 → resume=F entry →
+  핸들러도 F 호출).
+
+### v0.20.5 수정 = ISR-exit 도달 게이트 (양 엔진)
+
+원칙: **resume 주소 도달이 직전 명령의 아키텍처적 flow(순차 fallthrough
+또는 direct transfer의 target)로 설명되면 exit이 아니다.** 진짜 exit은
+xret 직후 도달이거나 (xret 커밋 누락 시) 설명 불가능한 불연속 도달.
+- legacy: epc-mode exit(`pc==ctx.resume`)에 게이트. pending이 xret이면
+  통과, fallthrough/target 일치면 reject (`prof.exit_rejects` +
+  "exit-reject" root 이벤트). heur/level exit은 기존 조건이 이미
+  xret/level 기반이라 무변경.
+- sim: **ADAPTER A7** — prev_was_xret + _arrival_explained(순차 or
+  pending direct target) 게이트. 함정 2개를 밟고 고침: ① update()가
+  base당 IR/Cy 2회 호출되어 첫 호출의 settle이 판정 재료(last_was_branch,
+  prev_ft)를 소비 → 판정을 **커밋 단위로 1회 캐시**해야 함 ② 캐시 키를
+  pc로 하면 같은 pc 재방문(공유 helper!) 시 이전 판정이 재사용돼 진짜
+  exit까지 차단 → **커밋 일련번호(_commit_serial)** 도입. _flowchk도
+  동일 결함이 있어 serial로 전환 (unknown 구간 사이 동일 pc 재방문 시
+  A6 체크 누락되던 잠재 버그 동시 수리).
+- unknown 구간 경유 도달은 "설명 불가" 취급(exit 허용, flow_lost).
+- CLI: exit_rejects stderr 라인 + **root-chain 중도 절단 자동 감지**
+  (--debug-roots 시 depth≤2 pop 중 drain이 아닌 것을 [사유]와 함께
+  나열 — 사용자 1번 질문 "어떻게 판단해야 할까"의 직접 답).
+- tests/test_v0205.py: 인터럽트 지점 전수 스윕(19지점×2엔진) — ISR
+  arc 정확치 + root 보존 + "count>0 && inclusive==0 금지"(사용자 증상
+  자체를 invariant로) + reject 후 진짜 exit 동작. 전체 184 green.
+
+### 사용자 회신 요청
+
+1. v0.20.5 재실행 (sim/legacy 모두): ① ISR 내부 함수들(restore 포함)의
+   inclusive가 정상 포함됐는지 ② legacy의 _start/BSP/startup inclusive가
+   최대치로 복구됐는지 ③ stderr "N ISR-exit arrivals rejected" 수치.
+2. --debug-roots 시 새로 나오는 "root-chain frames closed MID-RUN" 목록
+   — 남아있다면 그 [사유]가 다음 타깃.
+3. legacy 폐기 판단은 이 결과 보고 나서: 이번 병소는 양 엔진 공통이었고
+   legacy 특유 증상(1번)도 같은 뿌리였을 가능성이 높음.
+
+### 유의
+
+- 게이트가 막지 못하는 잔여 케이스: 핸들러가 resume 주소에 **간접
+  점프(jr/jalr)로** 도달하는 경우 — 간접은 어디든 갈 수 있어 "설명됨"
+  판정 불가라 exit을 허용함(기존 동작 보존). millicode의 jr t0가 정확히
+  resume에 착지하는 병리적 상황은 t0 값 특성상 사실상 불가능.
+- sim의 A5/A6/A7은 레퍼런스 이탈(주석 명기). 사용자 시뮬레이터가 같은
+  가짜 exit을 갖고 있다면 그 지점에서 의도적으로 수치가 갈라짐 —
+  exit-reject 이벤트가 시뮬레이터 쪽 수정 지점 리스트가 됨.
 
 ## 6k. v0.20.4 — ★★ 다음 세션 최우선: disc-ret (auipc-return frame 유출 수리, 사용자 재실행 대기)
 

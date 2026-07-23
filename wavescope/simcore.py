@@ -180,6 +180,14 @@ class SimProfiler(object):
         self.n_disc_returns = 0    # A6: frames closed by a discontinuity
                                    # landing on an open frame's return
                                    # address with no branch committed
+        self.n_exit_rejects = 0    # A7: pc==epc arrivals rejected as ISR
+                                   # exits (handler's own flow reached the
+                                   # resume address -- shared millicode)
+        self.prev_was_xret = False # A7: previous committed insn was xret
+        self._exit_gate_serial = -1    # A7: once-per-commit verdict cache
+        self._exit_gate_block = False
+        self._last_base = None         # commit serial: revisits of the
+        self._commit_serial = 0        # same pc are distinct commits
         self.dropped_unknown_pc = 0
 
     def _root(self, kind, cp, callee, info, depth):
@@ -253,6 +261,9 @@ class SimProfiler(object):
     def update(self, base: int, event: int, count: int) -> None:
         if not self.enabled_:
             return
+        if base != self._last_base:
+            self._last_base = base
+            self._commit_serial += 1
         if base not in self.infos_:
             self.dropped_unknown_pc += 1
             self.flow_lost = True      # A6: veneer/far-stub territory
@@ -260,7 +271,40 @@ class SimProfiler(object):
         info = self.infos_[base]
 
         # ISR return: current pc equals the saved epc
+        # ADAPTER A7 (NOT in the reference): the resume address can live
+        # in code the handler ALSO executes -- above all the shared
+        # __riscv_save/restore millicode (interrupt at `jal t0,save`
+        # puts mepc at the helper entry, and the handler's own prologue
+        # calls the same helper).  The reference exits on the bare
+        # pc==epc equality, draining the handler's frames mid-handler:
+        # arcs keep their call counts but lose their inclusive events,
+        # and the rest of the handler then corrupts the outer stack.
+        # A real exit arrives via xret (or as a discontinuity when the
+        # xret commit was dropped); an arrival explained by the previous
+        # instruction's own fallthrough/direct target is NOT an exit.
         if self.is_isr and self.isr_stack[-1].epc == base:
+            # the verdict must be computed ONCE per commit: update() is
+            # called for each event (IR, Cy, ...) of the same base, and
+            # the first call's settle consumes last_was_branch and
+            # advances prev_ft, which would flip the verdict on the
+            # second call and let the false exit through after all
+            if self._exit_gate_serial != self._commit_serial:
+                self._exit_gate_serial = self._commit_serial
+                self._exit_gate_block = (not self.prev_was_xret
+                                         and self._arrival_explained(base))
+                if self._exit_gate_block:
+                    self.n_exit_rejects += 1
+                    self._root("exit-reject", base, None,
+                               f"pc==epc 0x{base:x} but the handler's "
+                               f"own flow reaches it (shared code with "
+                               f"the interrupted path) -- not an exit "
+                               f"(A7)",
+                               len(self.call_stack))
+        if self.is_isr and self.isr_stack[-1].epc == base \
+                and self._exit_gate_serial == self._commit_serial \
+                and self._exit_gate_block:
+            pass                       # A7: rejected -- stay in the ISR
+        elif self.is_isr and self.isr_stack[-1].epc == base:
             top = self.isr_stack[-1]
             self.last_pc = top.last_pc
             self.branchType = top.branchType
@@ -315,14 +359,16 @@ class SimProfiler(object):
         # 139k-instruction arc for a 1-instruction function).  If the
         # landing equals an open frame's return address, close down to
         # that frame; entries are excluded (missed call / interrupt).
-        if self._flowchk_base != base:
-            self._flowchk_base = base
+        if self._flowchk_base != self._commit_serial:
+            self._flowchk_base = self._commit_serial
             disc = self.flow_lost or (self.prev_ft is not None
                                       and base != self.prev_ft)
             if disc and not settled:
                 self._disc_return(base)
             self.flow_lost = False
             self.prev_ft = base + self.sizes_.get(base, 4)
+            self.prev_was_xret = info.assembly.startswith(
+                ("mret", "sret", "uret", "eret"))
 
         if event == TRACE_Cy_direct:
             if self.first_isr_cycle:          # ISR first insn: clamp to 1
@@ -360,6 +406,25 @@ class SimProfiler(object):
         self.branchType = event
         self.last_was_branch = True
         self.last_branch_taken = taken
+
+    # ------------------------------------------------------------------
+    def _arrival_explained(self, base: int) -> bool:
+        """A7 helper: True when the previous instruction's own
+        architectural flow reaches `base` -- sequential fallthrough, or
+        a pending direct transfer whose static target is `base`.  Such
+        arrivals cannot be interrupt returns."""
+        if self.flow_lost:
+            return False        # arrived through untracked code: cannot
+                                # be explained by the handler's own flow
+        if self.prev_ft is not None and base == self.prev_ft:
+            return True
+        if self.last_was_branch and self.last_pc:
+            insn = self.binary.insns.get(self.last_pc)
+            if insn is not None:
+                t = direct_target(insn)
+                if t is not None and t == base:
+                    return True
+        return False
 
     # ------------------------------------------------------------------
     def _disc_return(self, cur_pc: int) -> None:
@@ -777,6 +842,7 @@ def _to_profile(p: SimProfiler, binary: BinaryInfo, epc_seen: bool) -> Profile:
     prof.return_guards = p.n_return_guard
     prof.chain_guards = p.n_chain_guard
     prof.discontinuity_returns = p.n_disc_returns
+    prof.exit_rejects = p.n_exit_rejects
     return prof
 
 

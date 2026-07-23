@@ -143,6 +143,10 @@ class Profile:
         self.spurious_epc = 0        # same-function mepc changes suppressed
         self.flow_anomalies = 0      # unexplained discontinuities (epc mode)
         self.orphan_xrets = 0        # xret committed with no ISR context
+        self.exit_rejects = 0        # v0.20.5: pc==resume arrivals rejected
+                                     # as exits because the handler's own
+                                     # flow (shared millicode/subroutines)
+                                     # explains them architecturally
         self.guarded_unwinds = 0     # unwinds stopped by the landing floor
                                      # (v0.20.3: pops that would have closed
                                      # a frame the landing pc is still inside)
@@ -886,8 +890,39 @@ def run(pc_stream: Iterable[Tuple], binary: BinaryInfo,
                 pass                 # level contexts exit on the signal only
             elif ctx.kind == "epc":
                 # simulator: committing the saved epc address restores the
-                # pre-interrupt context (works after indirect jumps too)
-                if pc == ctx.resume:
+                # pre-interrupt context (works after indirect jumps too).
+                # v0.20.5 arrival gate: the resume address can live in code
+                # the HANDLER also executes -- above all the SHARED
+                # save/restore millicode (interrupt at `jal t0,save` makes
+                # mepc = the helper entry, and the handler's own prologue
+                # calls the same helper).  Reaching the resume pc through
+                # the handler's own architectural flow (fallthrough or a
+                # direct transfer's target) is therefore NOT an exit; a
+                # real exit arrives via xret, or as a discontinuity when
+                # the xret commit was dropped.  False exits were draining
+                # handler frames early (arcs with calls but no inclusive)
+                # and then corrupting the outer stack.
+                arrival_explained = (
+                    pending is not None
+                    and pending.insn.mnemonic not in XRET_MNEMONICS
+                    and (pc == pending.fallthrough
+                         or (pending.target is not None
+                             and pc == pending.target)))
+                if pc == ctx.resume and arrival_explained:
+                    prof.exit_rejects += 1
+                    if prof.root_log is not None:
+                        _root_ev(prof, "exit-reject", pc, None,
+                                 f"pc==resume 0x{pc:x} but arrival is the "
+                                 f"handler's own flow "
+                                 f"({pending.insn.mnemonic}@0x"
+                                 f"{pending.pc:x}) -- shared code with "
+                                 f"the interrupted path; not an exit",
+                                 len(stack))
+                    if dbg is not None:
+                        dbg.note(f"isr-exit rejected at 0x{pc:x} "
+                                 f"(arrival explained by "
+                                 f"{pending.insn.mnemonic}@0x{pending.pc:x})")
+                elif pc == ctx.resume:
                     isr_ctxs.pop()
                     if prof.root_log is not None:
                         _root_ev(prof, "isr-exit", pc, None,
