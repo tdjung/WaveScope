@@ -1,2 +1,2 @@
 """WaveScope: waveform PC trace -> callgrind profile."""
-__version__ = "0.20.5"
+__version__ = "0.20.6"

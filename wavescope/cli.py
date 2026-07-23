@@ -297,9 +297,11 @@ def cmd_profile(args) -> int:
 
         samples = reader_timer = _Timed(samples)
 
+    if args.engine == "sim":            # backward-compat alias
+        args.engine = "default"
     if args.engine != "legacy":
         if args.isr_level:
-            print("[wavescope] --engine sim supports RISC-V epc semantics "
+            print("[wavescope] the default engine supports RISC-V epc semantics "
                   "only (--isr-level is a legacy-engine feature)",
                   file=sys.stderr)
             return 2
@@ -307,7 +309,7 @@ def cmd_profile(args) -> int:
             print("[wavescope] note: --no-isr-clamp is ignored by the sim "
                   "engine (the reference has no such switch)",
                   file=sys.stderr)
-        if args.debug_func and args.engine == "sim":
+        if args.debug_func and args.engine == "default":
             print("[wavescope] note: --debug-func traces the legacy "
                   "engine; use --engine both to run it alongside",
                   file=sys.stderr)
@@ -356,7 +358,7 @@ def cmd_profile(args) -> int:
                    trace_roots=args.debug_roots)
     else:
         from .simcore import compare_profiles, run_sim
-        print("[wavescope] engine: sim (literal transcription of "
+        print("[wavescope] engine: default (transcription of "
               "docs/simulator_reference.md)", file=sys.stderr)
         prof = run_sim(samples, binary, classifier,
                        trace_roots=args.debug_roots)
@@ -432,7 +434,7 @@ def cmd_profile(args) -> int:
                   file=sys.stderr)
 
     if args.debug_roots:
-        _print_roots(args.engine if args.engine != "both" else "sim",
+        _print_roots(args.engine if args.engine != "both" else "default",
                      getattr(prof, "root_log", None))
         if legacy_prof is not None:
             _print_roots("legacy", getattr(legacy_prof, "root_log", None))
@@ -501,12 +503,20 @@ def cmd_profile(args) -> int:
               f"subroutines between handler and interrupted code); the "
               f"real exit is taken at the xret instead ('exit-reject' "
               f"events under --debug-roots)", file=sys.stderr)
+    if getattr(prof, "epc_rewrites", 0):
+        print(f"[wavescope] {prof.epc_rewrites} software mepc writes "
+              f"consumed -- mepc changed while the flow was sequential "
+              f"(nested-interrupt epilogue restoring the outer mepc, or "
+              f"a task switch); no phantom ISR entry was declared and "
+              f"the pending exit was retargeted to the new value "
+              f"('epc-rewrite' events under --debug-roots)",
+              file=sys.stderr)
 
     if args.debug_roots:
         # judgment aid: an inclusive that is too small on the root chain
         # means a root-depth frame was closed BEFORE the end-of-trace
         # drain; list every such pop with its reason
-        for label, p_ in ((args.engine if args.engine != "both" else "sim",
+        for label, p_ in ((args.engine if args.engine != "both" else "default",
                            prof),
                           ("legacy", legacy_prof)):
             log = getattr(p_, "root_log", None) if p_ is not None else None
@@ -748,13 +758,17 @@ def main(argv=None) -> int:
                          "ticks, reasons, ISR enter/exit events and "
                          "tail-chain pops -- diagnoses roots whose "
                          "inclusive comes out too small")
-    pp.add_argument("--engine", choices=("legacy", "sim", "both"),
-                    default="legacy",
-                    help="profiling engine: 'legacy' (WaveScope's "
-                         "engine with healing/diagnostics), 'sim' "
-                         "(literal transcription of the simulator "
-                         "reference), or 'both' (sim output + legacy "
-                         "output as <out>.legacy + divergence summary)")
+    pp.add_argument("--engine", choices=("default", "legacy", "both",
+                                         "sim"),
+                    default="default",
+                    help="profiling engine: 'default' (transcription of "
+                         "the simulator reference plus documented "
+                         "adapters; formerly called 'sim', which is "
+                         "kept as an alias), 'legacy' (the FROZEN "
+                         "original engine -- kept for comparison, no "
+                         "longer maintained), or 'both' (default "
+                         "output + legacy output as <out>.legacy + "
+                         "divergence summary)")
     pp.add_argument("--check-inclusive", action="store_true",
                     help="report functions whose incoming-arc inclusive "
                          "differs from self + outgoing-arc inclusive "

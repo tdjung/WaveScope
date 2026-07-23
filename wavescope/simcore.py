@@ -32,7 +32,7 @@ from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 
 from .disasm import BinaryInfo, direct_target
-from .profiler import (E_BC, E_BI, E_BIM, E_CY, E_DR, E_DW, E_IR, EVENTS,
+from .profdata import (E_BC, E_BI, E_BIM, E_CY, E_DR, E_DW, E_IR, EVENTS,
                        N_EVENTS, CallSite, Profile)
 
 # BranchType (enum class BranchType)
@@ -183,6 +183,8 @@ class SimProfiler(object):
         self.n_exit_rejects = 0    # A7: pc==epc arrivals rejected as ISR
                                    # exits (handler's own flow reached the
                                    # resume address -- shared millicode)
+        self.n_epc_rewrites = 0    # A8: software mepc writes consumed
+                                   # without declaring a phantom entry
         self.prev_was_xret = False # A7: previous committed insn was xret
         self._exit_gate_serial = -1    # A7: once-per-commit verdict cache
         self._exit_gate_block = False
@@ -230,6 +232,39 @@ class SimProfiler(object):
                     (self.infos_[epc].func == self.infos_[pc].func):
                 self.epc_error_check = True
                 self.n_spurious += 1
+                return
+
+            # ADAPTER A8 (NOT in the reference): mepc changed, but the
+            # flow ARRIVED at this commit through its own architectural
+            # path (sequential, or a pending direct transfer's target)
+            # -- no trap can have been taken here, so this is a
+            # SOFTWARE write to mepc.  Real firmware does this all the
+            # time: nested-capable handlers restore the outer mepc in
+            # their epilogue (the ISR_end_of_process_interrupt shape),
+            # and task switchers aim mepc at the next task before mret.
+            # The reference declares a phantom nested ISR entry on the
+            # bare value change, freezing the live call stack: the very
+            # next `j __riscv_restore_0` then lands on an EMPTY stack
+            # and takes the reference's tail-noframe path -- the arc
+            # keeps its call count but never receives inclusive events,
+            # and the frozen (caller -> handler-epilogue) frames lose
+            # theirs too.  Instead: consume the new value as the
+            # expected resume (retargeting the CURRENT context's exit,
+            # since the eventual xret will go to the NEW mepc) and do
+            # not enter.
+            if (not force) and (self.prev_epc != epc) \
+                    and self._arrival_explained(pc):
+                self.n_epc_rewrites += 1
+                self._root("epc-rewrite", pc, epc,
+                           f"mepc -> 0x{epc:x} by software (flow at "
+                           f"0x{pc:x} is sequential/explained -- no "
+                           f"trap); "
+                           + ("ISR exit retargeted (A8)" if self.is_isr
+                              else "baseline updated, no entry (A8)"),
+                           len(self.call_stack))
+                self.prev_epc = epc
+                if self.is_isr:
+                    self.isr_stack[-1].epc = epc
                 return
 
             self.after_wfi = False
@@ -843,6 +878,7 @@ def _to_profile(p: SimProfiler, binary: BinaryInfo, epc_seen: bool) -> Profile:
     prof.chain_guards = p.n_chain_guard
     prof.discontinuity_returns = p.n_disc_returns
     prof.exit_rejects = p.n_exit_rejects
+    prof.epc_rewrites = p.n_epc_rewrites
     return prof
 
 

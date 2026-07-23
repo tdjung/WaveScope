@@ -241,7 +241,8 @@ instruction that eventually commits.
 - [x] Callgrind output with call tree + inclusive costs (event order
       `Ir Dr Dw Bc Bi Bim Cy`, `fl=` emitted only on change -- both for
       line-diffing against an existing profiler's output)
-- [x] `--engine sim|legacy|both`: a literal transcription of the
+- [x] `--engine default|legacy|both` (default: `default`): a
+      transcription of the
       reference simulator's algorithm (simcore) runs alongside the
       native engine; `both` writes both outputs and prints an
       arc-level divergence summary between them

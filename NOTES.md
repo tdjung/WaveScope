@@ -1,7 +1,7 @@
 # WaveScope — Project Notes (대화 인수인계용)
 
 > 새 대화 시작 시: 이 파일과 README.md를 먼저 읽고 이어서 작업.
-> 마지막 업데이트: 2026-07-23, v0.20.5
+> 마지막 업데이트: 2026-07-23, v0.20.6
 
 ## 1. 프로젝트 개요
 
@@ -277,6 +277,70 @@ isr-exit/stack-saturated — 이슈 6.1용), `isr enter/exit`(clamp 표시),
 `unmatched-ret`, `flow-anomaly`. 끝에 함수별 self 합계 + incoming arc
 전수(개수·inclusive)와 incl/self 비율 summary. 사용자에게 시뮬레이터
 로그와 같은 함수 구간을 나란히 받아 대조하는 워크플로 제안할 것.
+
+## 6m. v0.20.6 — ★★★ 다음 세션 최우선: 소프트웨어 mepc 재기록 = 유령 ISR entry (사용자 재실행 대기)
+
+### 사용자 지시/피드백 (2026-07-23, v0.20.5 결과)
+
+- 정책: **default 엔진 = 구 sim** (기본값 변경 + 명칭 default로).
+  legacy는 동결 — 수정 금지, 폐기 대신 미사용 코드로 보존.
+- ❌ default: ISR 내부 inclusive 누락 잔존. 구체 형상:
+  ISR_end_of_process_interrupt(IEOPI)가 `j __riscv_restore_0`로 끝남 →
+  (IEOPI→restore) arc는 **call count만 있고 inclusive 없음**. IEOPI를
+  jal로 부르는 두 함수(ISR_end_2_process/ISR_end_process — 호출 뒤
+  같은 함수 내 다른 라인으로 `j`)의 (caller→IEOPI) inclusive도 누락.
+
+### 근본 원인 (형상 재현으로 확정)
+
+**소프트웨어 mepc 쓰기 = 유령 중첩 ISR entry.** IEOPI류(중첩 에필로그/
+태스크 스위치)는 mret 직전 mepc를 csrw로 재기록함. 레퍼런스(와 전사본)는
+epc **값 변화만으로** entry를 선언 → 흐름이 순차인데도 유령 중첩 entry
+발생 → 라이브 ISR 스택([caller→IEOPI])이 stack-of-stack에 동결 + 새 빈
+스택 → 바로 다음 `j restore`가 **빈 스택 tail push = 레퍼런스
+tail-noframe 경로(count만 기록, frame 없음)** → restore arc inclusive
+영구 0 (사용자 증상 그대로), 동결된 caller frame들의 inclusive도 유실/
+왜곡. "count>0 & inclusive==0" 시그니처는 레퍼런스에서 tail-noframe
+단일 경로라는 사실이 결정적 단서였음.
+
+### v0.20.6 = ADAPTER A8 + 엔진 정책 반영
+
+- **A8** (simcore, 레퍼런스 이탈 주석 명기): update_epc에서 epc 변화
+  감지 시, 해당 커밋 도달이 **아키텍처적으로 설명되면**(순차 fallthrough
+  또는 pending direct target — A7의 _arrival_explained 재사용, update_epc
+  가 update()보다 먼저라 직전 커밋 플래그 유효) trap이 아니라 소프트웨어
+  쓰기로 판정: entry 선언 안 함, prev_epc 갱신, **is_isr이면
+  isr_stack[-1].epc를 새 값으로 재타깃**(실제 mret은 새 mepc로 가므로
+  exit 감지 정합). 카운터 prof.epc_rewrites + "epc-rewrite" root 이벤트
+  + CLI stderr 라인. flow_lost(unknown 경유)나 force(A4)는 게이트 미적용.
+  알려진 가정: mepc 신호가 커밋 정밀도로 정렬(트랩 entry 커밋에서 변화)
+  — 사용자 파형/시뮬레이터 하네스와 동일 전제.
+- **엔진 정책**: --engine choices = default|legacy|both (+숨은 별칭
+  sim→default 정규화), 기본값 default. legacy는 FROZEN 명기(help/README).
+  이번 세션부터 legacy 코드는 수정하지 않음 (v0.20.6의 A8도 simcore만).
+- **파일 분리**: 엔진 파일은 원래 분리돼 있었음(profiler.py=legacy,
+  simcore.py=default). 공유 데이터 모델(EVENTS/E_*/N_EVENTS, CallSite,
+  Profile)을 **wavescope/profdata.py로 추출** → default 엔진이 legacy
+  모듈을 import하지 않음. profiler.py는 하위호환 재수출 유지.
+- tests/test_v0206.py 5종: 사용자 IEOPI 형상 그대로(csrw 시점 epc 변화,
+  jal 후 `j`, 재타깃 exit) — 유령 entry 0, tail-noframe 0, restore/caller
+  arc 정확치, "count>0&&incl==0 금지", 비-ISR 소프트 쓰기. 전체 189 green.
+
+### 사용자 회신 요청
+
+1. v0.20.6 재실행 (이제 옵션 없이 default): ① IEOPI/restore/호출자 arc
+   inclusive 정상 포함 여부 ② stderr "N software mepc writes consumed"
+   수치 (IEOPI가 인터럽트마다 돌면 인터럽트 횟수와 비슷해야 정상).
+2. --debug-roots에서 "epc-rewrite" 이벤트가 IEOPI의 csrw 지점에 찍히는지.
+3. 남은 누락이 있으면: 해당 함수명 + 그 지점 root 이벤트 (tail-noframe이
+   또 보이면 다른 빈-스택 경로가 남은 것 → 그 직전 이벤트가 범인).
+4. 시뮬레이터 대조 시: 시뮬레이터도 같은 유령 entry를 가질 것이므로
+   epc-rewrite 지점마다 의도적 발산 예상 — 시뮬레이터 수정 포인트 목록.
+
+### 유의/미결
+
+- legacy 동결: 앞으로 legacy 관련 사용자 보고는 기록만 하고 수정 안 함.
+- (계속 미결) 과거 t=145 [사유] — 6l까지의 수정들(A7+A8)이 원인군을
+  대부분 커버했을 가능성이 높지만 사용자 확인 문자열은 여전히 미수신.
 
 ## 6l. v0.20.5 — ★★★ 다음 세션 최우선: 공유 millicode 가짜 ISR exit (사가의 유력 근본 병소, 사용자 재실행 대기)
 
