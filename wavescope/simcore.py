@@ -187,6 +187,8 @@ class SimProfiler(object):
                                    # resume address -- shared millicode)
         self.n_epc_rewrites = 0    # A8: software mepc writes consumed
                                    # without declaring a phantom entry
+        self.n_tail_frames = 0     # A9: frames synthesized for tail
+                                   # calls on an empty stack
         self.prev_was_xret = False # A7: previous committed insn was xret
         self._exit_gate_serial = -1    # A7: once-per-commit verdict cache
         self._exit_gate_block = False
@@ -632,21 +634,33 @@ class SimProfiler(object):
                 return
             self.calls[self.last_pc][cur_pc].count += 1
             if not self.call_stack:
-                self._root("tail-noframe", self.last_pc, cur_pc,
-                           "empty stack: count only, NO inclusive "
-                           "(reference semantics)", 0)
-            if self.call_stack:
+                # ADAPTER A9 (NOT in the reference): the reference
+                # records COUNT ONLY for a tail call on an empty stack
+                # -- so an ISR handler that dispatches its workers with
+                # `j` (tail) on a fresh ISR-local stack loses every
+                # callee's inclusive, permanently (the reported
+                # ISR_A -> FUNC_A/FUNC_B tail-noframe signature after
+                # an A4 forced re-entry).  Synthesize the frame instead:
+                # inclusive accrues, the callee's return pops it via
+                # rule 4 (landing in the caller's function), and the
+                # ISR-exit drain flushes it otherwise.
+                self.n_tail_frames += 1
+                self._root("tail-frame", self.last_pc, cur_pc,
+                           "empty stack: frame SYNTHESIZED (A9; the "
+                           "reference records count-only here and the "
+                           "callee's inclusive would be lost)", 1)
+            else:
                 parent = " | under " + self.call_stack[-1].callee_func
                 self._root("push", self.last_pc, cur_pc, "TAIL" + parent,
                            len(self.call_stack) + 1)
-                tail_entry = CallStackEntry()
-                tail_entry.caller_pc = self.last_pc
-                tail_entry.callee_pc = cur_pc
-                tail_entry.caller_func = from_func
-                tail_entry.callee_func = to_func
-                tail_entry.is_tail_call = True
-                tail_entry.events_at_entry = list(self.accumulated_events)
-                self.call_stack.append(tail_entry)
+            tail_entry = CallStackEntry()
+            tail_entry.caller_pc = self.last_pc
+            tail_entry.callee_pc = cur_pc
+            tail_entry.caller_func = from_func
+            tail_entry.callee_func = to_func
+            tail_entry.is_tail_call = True
+            tail_entry.events_at_entry = list(self.accumulated_events)
+            self.call_stack.append(tail_entry)
 
         elif self.branchType == BT_RETURN:
             if self.call_stack:
@@ -786,6 +800,15 @@ def _update_profile(p: SimProfiler, binary: BinaryInfo, classifier,
     if insn is None:
         return
 
+    if insn.mnemonic == "auipc":
+        # v0.20.9 simulator parity: the reference counts every auipc
+        # commit as Bi+1 and Bim+1.  Rationale: macro-fused auipc+jalr
+        # pairs commit as ONE instruction at the auipc's pc, so the
+        # hidden indirect-jump half's branch events are attributed to
+        # the auipc.  (Semantic caveat, kept for diff parity: a
+        # standalone address-forming auipc gets counted too.)
+        p.update(pc, TRACE_Bi, 1)
+        p.update(pc, TRACE_Bim, 1)
     if cls.is_cond_branch:                    # Group::BRANCH
         p.update(pc, TRACE_Bc, 1)
         # ADAPTER A1: taken from the next committed pc vs static npc
@@ -915,6 +938,7 @@ def _to_profile(p: SimProfiler, binary: BinaryInfo, epc_seen: bool) -> Profile:
     prof.discontinuity_returns = p.n_disc_returns
     prof.exit_rejects = p.n_exit_rejects
     prof.epc_rewrites = p.n_epc_rewrites
+    prof.tail_frames = p.n_tail_frames
     prof.func_log = p.func_log
     return prof
 

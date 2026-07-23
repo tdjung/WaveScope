@@ -1,7 +1,7 @@
 # WaveScope — Project Notes (대화 인수인계용)
 
 > 새 대화 시작 시: 이 파일과 README.md를 먼저 읽고 이어서 작업.
-> 마지막 업데이트: 2026-07-23, v0.20.8
+> 마지막 업데이트: 2026-07-23, v0.20.9
 
 ## 1. 프로젝트 개요
 
@@ -277,6 +277,62 @@ isr-exit/stack-saturated — 이슈 6.1용), `isr enter/exit`(clamp 표시),
 `unmatched-ret`, `flow-anomaly`. 끝에 함수별 self 합계 + incoming arc
 전수(개수·inclusive)와 incl/self 비율 summary. 사용자에게 시뮬레이터
 로그와 같은 함수 구간을 나란히 받아 대조하는 워크플로 제안할 것.
+
+## 6p. v0.20.9 — ★★ 다음 세션 우선: ISR tail-dispatch 해결(A9) + auipc Bi/Bim (사용자 재실행 대기)
+
+### 사용자 회신 (2026-07-23, v0.20.8 func-trace 결과) — 네 번째 패턴 확정
+
+func-trace가 병소를 정확히 지목:
+```
+t=2290918 isr-enter d=6 ISR_A@0x1424 -> FUNC_WFI@0xe3e4 [forced(A4 reenter)]
+t=2290967 tail-noframe d=0 ISR_A@0x1492 -> FUNC_A@0x0cfc [empty stack: count only]
+t=2291023 tail-noframe d=0 ISR_A@0x1516 -> FUNC_B@0x1394 [empty stack: count only]
+```
+해석: FUNC_WFI의 wfi 루프에서 동일 mepc 재인터럽트 → A4 강제 재진입
+(정상) → **핸들러가 벡터 직접 진입이라 자기 frame이 없고**, 워커들을
+`j`(tail)로 디스패치 → **빈 스택 위 tail = 레퍼런스가 count만 기록**
+(tail-noframe) → FUNC_A/B inclusive 영구 유실. 즉 버그가 아니라
+**레퍼런스 자체의 의미론적 한계**이며, `j`-디스패치 ISR에서는 항상
+발생. (FUNC_A@0x0cfc가 ISR_A@0x14xx보다 낮은 주소 + 복귀 흐름 존재 —
+컴파일러 분할부(.part/.cold)일 가능성도 있으나 기전은 동일.)
+
+### v0.20.9 수정
+
+1. **ADAPTER A9**: 빈 스택 위 tail call에서 frame을 **합성**(count는
+   기존대로 + frame 추가, "tail-frame" 이벤트). callee의 복귀는 rule 4
+   (caller 함수 내 착지)로 정상 pop, 미복귀 시 isr-exit drain이 flush.
+   tail-noframe 이벤트/경로는 소멸. 카운터 prof.tail_frames + CLI
+   stderr 라인. 레퍼런스 명시 이탈 — test_simcore의 count-only 고정
+   테스트 2건을 A9 의미론으로 갱신(주석 명기).
+2. **auipc → Bi+Bim** (_update_profile): 시뮬레이터 패리티로 auipc
+   커밋마다 Bi+1, Bim+1 (사용자: "auipc일 때 Bi, Bcm 1씩"). 근거:
+   fused auipc+jalr 쌍이 auipc pc로 1커밋되므로 숨은 간접점프 몫의
+   분기 이벤트 귀속. 의미상 단독 auipc(주소 형성용)도 집계되는 과계수
+   여지 있음 — **사용자에게 확인 요청**: 시뮬레이터가 무조건인지
+   fusion 조건부인지 (조건부면 A6 불연속 신호로 게이트 가능).
+3. tests/test_v0209.py 5종: 사용자 형상 그대로(벡터 직접 진입 frameless
+   핸들러 + wfi 동일 mepc 2회째 A4 강제 + `j` 디스패치 + jr a5 복귀)
+   — 두 패스 모두 arc inclusive 정확, tail-noframe 0, func-trace pop
+   가시화, auipc Bi/Bim. 전체 205 green.
+
+### 사용자 회신 요청
+
+1. v0.20.9 재실행: FUNC_A/FUNC_B inclusive 정상 포함 + stderr "N frames
+   synthesized ... (A9)" 수치 + func-trace에서 tail-noframe 소멸/
+   tail-frame 등장 확인.
+2. auipc Bi/Bim: 시뮬레이터 규칙이 **모든 auipc 무조건**인지, fused
+   쌍일 때만인지 — 무조건이면 현행 유지(패리티), 조건부면 알려달라
+   (게이트 추가).
+3. 이로써 ISR inclusive 4개 패턴(공유 millicode·소프트 mepc·공유
+   callee 간접·빈스택 tail-dispatch) 전부 처리 — 남은 누락 있으면
+   동일하게 --debug-func func-trace 회신.
+
+### 유의
+
+- A9로 시뮬레이터와 의도적 발산: 시뮬레이터는 여전히 count-only이므로
+  해당 arc들의 inclusive가 우리 쪽에만 존재 — tail_frames 카운트가 그
+  지점 목록. 시뮬레이터에 같은 수정 이식 권장.
+- t=145 [사유]는 여전히 미수신이나 A4~A9로 원인군 사실상 소진 추정.
 
 ## 6o. v0.20.8 — ★★ 다음 세션 우선: clone 정책 확정 필요 + inline fl + func-trace (사용자 재실행 대기)
 

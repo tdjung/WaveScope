@@ -511,6 +511,12 @@ def cmd_profile(args) -> int:
               f"the pending exit was retargeted to the new value "
               f"('epc-rewrite' events under --debug-roots)",
               file=sys.stderr)
+    if getattr(prof, "tail_frames", 0):
+        print(f"[wavescope] {prof.tail_frames} frames synthesized for "
+              f"tail calls on an empty stack (A9) -- the reference "
+              f"records count-only there, losing the callee's inclusive "
+              f"(typical for ISR handlers dispatching workers with `j`)",
+              file=sys.stderr)
 
     if args.debug_roots:
         # judgment aid: an inclusive that is too small on the root chain

@@ -206,11 +206,15 @@ class TestSimEpcMidTraceDefinition(unittest.TestCase):
 
 class TestSimRootLog(unittest.TestCase):
     def test_empty_stack_tail_recorded(self):
+        # v0.20.9 ADAPTER A9: the reference records count-only here
+        # ("tail-noframe"); we now synthesize the frame so the callee's
+        # inclusive is not lost (ISR `j`-dispatch pattern)
         tr = [(0, 0x1008), (1, 0x100c)] + \
              [(2 + i, pc) for i, pc in enumerate(REST)]
         prof = run_sim(iter(tr), milli_binary(), CL, trace_roots=3)
         kinds = [e[1] for e in prof.root_log["ev"]]
-        self.assertIn("tail-noframe", kinds)
+        self.assertIn("tail-frame", kinds)
+        self.assertNotIn("tail-noframe", kinds)
 
     def test_push_pop_events(self):
         prof = run_sim(iter(full_trace()), milli_binary(), CL,
@@ -221,12 +225,16 @@ class TestSimRootLog(unittest.TestCase):
 
 
 class TestSimEmptyStackTail(unittest.TestCase):
-    def test_count_without_frame(self):
+    def test_count_with_synthesized_frame(self):
+        # v0.20.9 ADAPTER A9 (deliberate reference deviation): the
+        # frame is synthesized, so the tail callee's body accrues as
+        # inclusive instead of being lost
         tr = [(0, 0x1008), (1, 0x100c)] + \
              [(2 + i, pc) for i, pc in enumerate(REST)]
         prof = run_sim(iter(tr), milli_binary(), CL)
         self.assertEqual(prof.calls[(0x100c, 0x6000)].count, 1)
-        self.assertEqual(prof.calls[(0x100c, 0x6000)].inclusive[E_IR], 0)
+        self.assertGreater(prof.calls[(0x100c, 0x6000)].inclusive[E_IR], 0)
+        self.assertEqual(prof.tail_frames, 1)
 
 
 if __name__ == "__main__":
