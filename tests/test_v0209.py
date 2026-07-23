@@ -94,7 +94,10 @@ class TestIsrTailDispatch(unittest.TestCase):
 
 
 class TestAuipcBranchEvents(unittest.TestCase):
-    def test_auipc_counts_bi_bim(self):
+    def test_auipc_counts_no_branch_events(self):
+        # v0.20.10: the v0.20.9 auipc->Bi/Bim rule was withdrawn (the
+        # user confirmed their simulator does NOT count it; it was
+        # confused with something else) -- auipc is a plain ALU insn
         b = BinaryInfo()
         prog = [(0x100, 4, "auipc", "t1,0xf1000"),
                 (0x104, 4, "addi", "a0,a0,1"),
@@ -105,8 +108,8 @@ class TestAuipcBranchEvents(unittest.TestCase):
         b._starts = [0x100]
         tr = [(0, 0x100), (1, 0x104), (2, 0x108), (3, 0x100), (4, 0x104)]
         prof = run_sim(iter(tr), b, CL)
-        self.assertEqual(prof.self_cost[0x100][E_BI], 2)
-        self.assertEqual(prof.self_cost[0x100][E_BIM], 2)
+        self.assertEqual(prof.self_cost[0x100][E_BI], 0)
+        self.assertEqual(prof.self_cost[0x100][E_BIM], 0)
         self.assertEqual(prof.self_cost[0x104][E_BI], 0)
         self.assertEqual(prof.self_cost[0x104][E_BIM], 0)
 

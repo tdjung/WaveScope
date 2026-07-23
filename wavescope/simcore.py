@@ -800,15 +800,6 @@ def _update_profile(p: SimProfiler, binary: BinaryInfo, classifier,
     if insn is None:
         return
 
-    if insn.mnemonic == "auipc":
-        # v0.20.9 simulator parity: the reference counts every auipc
-        # commit as Bi+1 and Bim+1.  Rationale: macro-fused auipc+jalr
-        # pairs commit as ONE instruction at the auipc's pc, so the
-        # hidden indirect-jump half's branch events are attributed to
-        # the auipc.  (Semantic caveat, kept for diff parity: a
-        # standalone address-forming auipc gets counted too.)
-        p.update(pc, TRACE_Bi, 1)
-        p.update(pc, TRACE_Bim, 1)
     if cls.is_cond_branch:                    # Group::BRANCH
         p.update(pc, TRACE_Bc, 1)
         # ADAPTER A1: taken from the next committed pc vs static npc

@@ -1,7 +1,7 @@
 # WaveScope — Project Notes (대화 인수인계용)
 
 > 새 대화 시작 시: 이 파일과 README.md를 먼저 읽고 이어서 작업.
-> 마지막 업데이트: 2026-07-23, v0.20.9
+> 마지막 업데이트: 2026-07-23, v0.20.10
 
 ## 1. 프로젝트 개요
 
@@ -277,6 +277,26 @@ isr-exit/stack-saturated — 이슈 6.1용), `isr enter/exit`(clamp 표시),
 `unmatched-ret`, `flow-anomaly`. 끝에 함수별 self 합계 + incoming arc
 전수(개수·inclusive)와 incl/self 비율 summary. 사용자에게 시뮬레이터
 로그와 같은 함수 구간을 나란히 받아 대조하는 워크플로 제안할 것.
+
+## 6q. v0.20.10 — 상태: ISR inclusive 사가 종결 ✅ / auipc Bi/Bim 철회
+
+### 사용자 확인 (2026-07-23, v0.20.9 결과)
+
+- ✅ **ISR inclusive 문제 해결 확인** — 4개 패턴(공유 millicode 가짜
+  exit A7 / 소프트웨어 mepc 재기록 A8 / 공유 callee 간접 도달 A7강화 /
+  빈스택 tail-dispatch A9)으로 종결. 사가 시작점이던 "_start inclusive
+  최대 아님"(6i)부터의 계보 마무리.
+- auipc Bi/Bim: **사용자 착오였음** (시뮬레이터는 auipc를 분기
+  이벤트로 집계하지 않음, 다른 것과 혼동). → v0.20.10에서 규칙 철회,
+  테스트를 "auipc는 분기 이벤트 0"으로 반전 고정.
+
+### 잔여/유의
+
+- A9는 여전히 의도적 레퍼런스 이탈 (시뮬레이터는 count-only) — 해당
+  arc의 inclusive 발산은 tail_frames 카운트로 추적 가능, 시뮬레이터
+  이식 권장 상태 유지.
+- t=145 [사유] 미수신이나 A4~A9로 종결 추정. legacy 동결 유지.
+- clone 정책(구분 vs --merge-clones) 사용자 결정 대기 중 (6o 질문 1).
 
 ## 6p. v0.20.9 — ★★ 다음 세션 우선: ISR tail-dispatch 해결(A9) + auipc Bi/Bim (사용자 재실행 대기)
 
