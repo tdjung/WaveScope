@@ -97,6 +97,44 @@ def _parse_disasm_fields(line):
     return (int(m.group(1), 16), enc_tokens, sp[0].lower(),
             sp[1].strip() if len(sp) > 1 else "")
 _LABEL_RE = re.compile(r"^([0-9a-fA-F]+) <(.+)>:\s*$")
+_CLONE_RE = re.compile(r"\s*\[clone\s+[^\]]*\]")
+_GCC_SUFFIX_RE = re.compile(
+    r"(\.(?:constprop|part|isra|cold|likely|unlikely|lto_priv)"
+    r"(?:\.\d+)?)+$")
+
+
+def _clean_symbol(name: str) -> str:
+    """Normalize compiler-generated clone symbols so a function shows
+    up ONCE under its real name.  objdump -C renders clones as
+    'foo(int) [clone .constprop.0]' when it can demangle them, and as
+    the raw '_Z3fooi.constprop.0' when the trailing GCC suffix defeats
+    its demangler (the user-reported duplicated, undemangled entry).
+    Both collapse to the base name here; identically named functions
+    are aggregated by the callgrind viewer."""
+    s = _CLONE_RE.sub("", name).strip()
+    s = _GCC_SUFFIX_RE.sub("", s)
+    return s or name
+
+
+def _batch_demangle(names):
+    """Demangle residual '_Z...' names (clone suffix already stripped)
+    with c++filt; returns a dict of successful translations.  Missing
+    c++filt degrades gracefully to the stripped mangled names."""
+    todo = sorted({n for n in names if n.startswith("_Z")})
+    if not todo:
+        return {}
+    try:
+        import subprocess
+        res = subprocess.run(["c++filt"], input="\n".join(todo),
+                             capture_output=True, text=True, timeout=30)
+        if res.returncode != 0:
+            return {}
+        got = res.stdout.split("\n")
+        return {m: d for m, d in zip(todo, got) if d and d != m}
+    except Exception:
+        return {}
+
+
 _SYM_RE = re.compile(
     r"^([0-9a-fA-F]+)\s+([lgw!\s])([w\s])([C\s])([W\s])([Ii\s])([dD\s])([FfO\s])\s+(\S+)\s+([0-9a-fA-F]+)\s+(.*)$")
 
@@ -233,7 +271,13 @@ def load_binary(elf_path: str, toolchain_prefix: str = "",
             end = min(end, nxt) if size else end
             if end <= start:
                 end = nxt
-        info.funcs.append(Func(name=name, start=start, end=max(end, start + 2)))
+        info.funcs.append(Func(name=_clean_symbol(name), start=start,
+                               end=max(end, start + 2)))
+    dem = _batch_demangle([f.name for f in info.funcs])
+    if dem:
+        for f in info.funcs:
+            if f.name in dem:
+                f.name = dem[f.name]
     info._starts = [f.start for f in info.funcs]
     info.data_syms = data_syms
 

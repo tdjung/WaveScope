@@ -1,7 +1,7 @@
 # WaveScope — Project Notes (대화 인수인계용)
 
 > 새 대화 시작 시: 이 파일과 README.md를 먼저 읽고 이어서 작업.
-> 마지막 업데이트: 2026-07-23, v0.20.6
+> 마지막 업데이트: 2026-07-23, v0.20.7
 
 ## 1. 프로젝트 개요
 
@@ -277,6 +277,59 @@ isr-exit/stack-saturated — 이슈 6.1용), `isr enter/exit`(clamp 표시),
 `unmatched-ret`, `flow-anomaly`. 끝에 함수별 self 합계 + incoming arc
 전수(개수·inclusive)와 incl/self 비율 summary. 사용자에게 시뮬레이터
 로그와 같은 함수 구간을 나란히 받아 대조하는 워크플로 제안할 것.
+
+## 6n. v0.20.7 — ★★★ 다음 세션 최우선: 공유-callee 가짜 exit (A7 간접-도달 구멍 봉합) + clone 심볼 + jcnd 순서 (사용자 재실행 대기)
+
+### 사용자 피드백 (2026-07-23, v0.20.6 결과) 및 분석 검증
+
+- 사용자 분석: ISR 4개 중 2개만 inclusive 누락. **배타 callee(ISR_D:
+  한 ISR에서만 호출)는 정상, 공유 callee(ISR_B: 다른 ISR/일반 함수도
+  호출)는 누락** → 합성 재현으로 **분석 정확함을 확인**.
+- 기전: 공유 callee는 피인터럽트 코드에서도 실행되므로 mepc가 그 함수
+  **내부**(특히 `jal t0,save` 직후 = save의 jr t0 복귀점)를 가리킬 수
+  있음. 핸들러가 같은 함수를 재실행하면 save의 `jr t0`(**간접**)가
+  mepc에 정확히 착지 → v0.20.5 A7 게이트는 간접 도달을 판정 불가
+  (6l에 문서화했던 바로 그 구멍) → 가짜 exit → ISR 스택 조기 drain
+  → (ISR_A→ISR_B) inclusive 소실 + 이후 tail-noframe 연쇄. 배타
+  callee는 resume을 품을 일이 없어 무사 — 2/4 패턴과 정합.
+
+### v0.20.7 수정 3건
+
+1. **A7 강화** (simcore): exit 차단 조건을 "순차 도달 OR **임의의
+   pending branch(간접 포함)가 이 커밋에서 settle**"로 확장. 진짜
+   exit은 xret 직후(branch pending 없음, prev_was_xret로 허용)거나
+   unknown 경유(flow_lost 허용)만. 알려진 트레이드오프: mret 커밋이
+   샘플링에서 유실되고 직전이 branch면 exit을 놓칠 수 있으나(드레인은
+   여전히 flush함), 가짜 exit의 체계적 inclusive 0화보다 훨씬 경미.
+   A8 게이트는 기존(순차+direct target) 유지 — 간접 착지에서의 epc
+   변화는 진짜 트랩일 수 있음.
+2. **clone 심볼 정규화** (disasm): `[clone .constprop.N]` 주석 제거 +
+   raw `.constprop/.part/.isra/.cold/...` 접미 제거 후 잔여 `_Z...`는
+   c++filt 일괄 demangle (없으면 우아한 강등). 결과: 원본과 클론이
+   같은 이름 → callgrind 뷰어가 집계 → 중복/미해석 항목 소멸.
+3. **jcnd 순서**: count 내림차순 → **taken 레코드 우선, not-taken
+   후행** (그룹 내 count 내림차순, 주소 오름차순). 시뮬레이터 출력
+   순서와 재정합.
+
+- tests/test_v0207.py 7종: 사용자 지목 지점(mepc=sub+4, 간접 착지) +
+  전 지점 스윕("count>0&&incl==0 금지" + 배타 callee 불변) + clone
+  정리 + c++filt + jcnd taken-우선. 전체 196 green.
+
+### 사용자 회신 요청
+
+1. v0.20.7 재실행: ① 문제였던 2개 ISR의 공유 callee inclusive 정상화
+   여부 ② stderr exit-reject 수치 (공유 callee가 자주 인터럽트되면
+   유의미하게 나옴) ③ clone 중복 소멸 + jcnd 순서 확인.
+2. 남은 누락 시: 함수명 + --debug-roots의 해당 구간 (tail-noframe /
+   isr-exit 이벤트 유무).
+
+### 유의/미결
+
+- (계속) legacy 동결. t=145 [사유] 미수신 — A7/A8 강화로 원인군 대부분
+  커버 추정.
+- clone 집계는 이름 통합 방식: 클론과 원본의 코드 주소는 별개로 남고
+  뷰어에서 합산 표시. 엔진 내부 이름 비교(A5a 재귀 예외 등)에 이론상
+  영향 가능하나 실무 무시 수준 (클론이 원본을 호출하는 희귀 케이스).
 
 ## 6m. v0.20.6 — ★★★ 다음 세션 최우선: 소프트웨어 mepc 재기록 = 유령 ISR entry (사용자 재실행 대기)
 

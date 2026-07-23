@@ -115,11 +115,14 @@ def write(prof: Profile, out: TextIO, binary_path: str, cmd: str = "",
             specs = jumps_by_src.get(pc)
             if specs:
                 total = sum(n for kind, _, n in specs if kind == "jcnd")
-                # simulator order (user-corrected): DESCENDING count
-                # (jcnd=18/27 before jcnd=9/27), ties by ascending
-                # target address (jcnd=1/2 0x00c before jcnd=1/2 0x010)
-                for kind, dst, n in sorted(specs,
-                                           key=lambda x: (-x[2], x[1])):
+                # simulator order (user-corrected v0.20.7): the TAKEN
+                # record (target != fallthrough) prints first, the
+                # not-taken (fallthrough) record after it; within a
+                # group: descending count, then ascending target
+                _fi = b.insns.get(pc)
+                _ft = pc + _fi.size if _fi is not None else None
+                for kind, dst, n in sorted(
+                        specs, key=lambda x: (x[1] == _ft, -x[2], x[1])):
                     _, dline = b.line_at(dst)
                     if kind == "jcnd":
                         out.write(f"jcnd={n}/{total or n} 0x{dst:x} {dline}\n")

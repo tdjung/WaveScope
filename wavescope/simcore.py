@@ -325,8 +325,23 @@ class SimProfiler(object):
             # second call and let the false exit through after all
             if self._exit_gate_serial != self._commit_serial:
                 self._exit_gate_serial = self._commit_serial
-                self._exit_gate_block = (not self.prev_was_xret
-                                         and self._arrival_explained(base))
+                # v0.20.7 tightening: ANY pending branch settling at
+                # this commit -- indirect included -- means the arrival
+                # is the handler's own flow.  This closes the v0.20.5
+                # documented hole: a SHARED callee (executed by both the
+                # interrupted code and the handler) can carry the resume
+                # address inside it, and its millicode save's `jr t0`
+                # (indirect) lands exactly there when the handler
+                # re-executes it -- exit must not fire.  A real exit
+                # arrives after an xret, which never leaves a branch
+                # pending (prev_was_xret admits it), or through
+                # untracked code (flow_lost admits it).
+                self._exit_gate_block = (
+                    not self.prev_was_xret
+                    and not self.flow_lost
+                    and ((self.prev_ft is not None
+                          and base == self.prev_ft)
+                         or self.last_was_branch))
                 if self._exit_gate_block:
                     self.n_exit_rejects += 1
                     self._root("exit-reject", base, None,
